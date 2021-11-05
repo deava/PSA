@@ -1,0 +1,106 @@
+commit 3ed8356a9284a14897398cbcb348be52bd35bace
+Author: Tuukka Tuomikoski <tuukka.tuomikoski@gmail.com>
+Date:   Fri Nov 5 20:52:41 2021 +0200
+
+    Renamed and removed
+
+ tiedostoja/file2             | 0
+ tiedostoja/{file1 => file22} | 0
+ 2 files changed, 0 insertions(+), 0 deletions(-)
+
+commit 59084f4d85a068bc204dfce331170560b1b4b6cf
+Author: Tuukka Tuomikoski <tuukka.tuomikoski@gmail.com>
+Date:   Fri Nov 5 20:50:36 2021 +0200
+
+    new folder
+
+ tiedostoja/file1 | 0
+ tiedostoja/file2 | 0
+ tiedostoja/file3 | 0
+ 3 files changed, 0 insertions(+), 0 deletions(-)
+
+commit caa45c0896c0035ce969323d5701ef751f4a390e
+Author: Tuukka Tuomikoski <tuukka.tuomikoski@gmail.com>
+Date:   Fri Nov 5 20:45:17 2021 +0200
+
+    more changes
+
+ eka.txt    | 2 +-
+ kolmas.txt | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+commit 5cf98ee2195bf1a7b37f4f22ebcfd89b8041d0b8
+Author: Tuukka Tuomikoski <tuukka.tuomikoski@gmail.com>
+Date:   Fri Nov 5 20:44:41 2021 +0200
+
+    renamed tiedosto.txt to eka.txt
+
+ tiedosto.txt => eka.txt | 0
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+
+commit 320f3d1e7954e935f91d49beb18c939e33f414f5
+Author: Tuukka Tuomikoski <tuukka.tuomikoski@gmail.com>
+Date:   Fri Nov 5 20:44:03 2021 +0200
+
+    deleted toinen.txt
+
+ toinen.txt | 1 -
+ 1 file changed, 1 deletion(-)
+
+commit 8af9f9a76dd141b67052a1e36d68279e877ae9fe
+Author: Tuukka Tuomikoski <tuukka.tuomikoski@gmail.com>
+Date:   Fri Nov 5 20:40:45 2021 +0200
+
+    Added stuff, modified files
+
+ kolmas.txt     |  1 +
+ stuff/file.txt |  1 +
+ tiedosto.txt   | 13 +++++++++++++
+ toinen.txt     |  1 +
+ 4 files changed, 16 insertions(+)
+
+commit 67046f39b0bef6604cd5ef8793bbc052c1b2f146
+Author: Tuukka Tuomikoski <tuukka.tuomikoski@gmail.com>
+Date:   Fri Nov 5 20:33:42 2021 +0200
+
+    created kolmas.txt
+
+ kolmas.txt | 0
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+
+commit 11027c729afe31f5a97a4238dcac2eea21abe800
+Author: Tuukka Tuomikoski <tuukka.tuomikoski@gmail.com>
+Date:   Fri Nov 5 20:32:07 2021 +0200
+
+    muutos ja lisäys
+
+ tiedosto.txt | 1 +
+ toinen.txt   | 0
+ 2 files changed, 1 insertion(+)
+
+commit 6913ed6859ab2fac4db09ebb19a7cd29b490f110
+Author: Tuukka Tuomikoski <tuukka.tuomikoski@gmail.com>
+Date:   Fri Nov 5 20:31:13 2021 +0200
+
+    tiedosto.txt luotu
+
+ tiedosto.txt | 0
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+
+commit 7ecb144dcedad0082528f2366d402c8879d94abd
+Author: Tuukka Tuomikoski <68696300+tugee@users.noreply.github.com>
+Date:   Fri Nov 5 18:16:31 2021 +0200
+
+    Update README.md
+
+ README.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+commit 838421e19e064087dcf4ce1d45099c16c3e418d3
+Author: Tuukka Tuomikoski <68696300+tugee@users.noreply.github.com>
+Date:   Fri Nov 5 18:16:16 2021 +0200
+
+    Initial commit
+
+ README.md | 2 ++
+ 1 file changed, 2 insertions(+)
