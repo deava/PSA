@@ -3,7 +3,9 @@ University of Helsinki - Software Development Methods course project
 
 ## Documentation
 
-[timekeeping]()
+[Timekeeping]()
+
+[Requirements]()
 
 ## Exercises
 
