@@ -1,6 +1,10 @@
 # Software Development Methods project
 University of Helsinki - Software Development Methods course project
 
+## Documentation
+
+[timekeeping]()
+
 ## Exercises
 
 ### Week 1
@@ -8,3 +12,4 @@ University of Helsinki - Software Development Methods course project
 [gitlog.txt](https://github.com/tugee/softdev-project/blob/main/laskarit/viikko1/gitlog.txt)
 
 [komentorivi.txt](https://github.com/tugee/softdev-project/blob/main/laskarit/viikko1/komentorivi.txt)
+
