@@ -4,8 +4,8 @@
 
 This tool allows a user to analyze recently created smart contracts and transactions preceding a smart contracts creation on the ethereum blockchain.
 
-There are multiple possible use-cases for this tool. One of th emost interesting being the possibility to analyze DeFi tokens for the purpose of investing.
-By mapping out transactions preceding a smart contracts creation we can filter out projects with links to scams or market manipulation when given a list of such projects.
+There are multiple possible use-cases for this tool. One of the most interesting being the possibility to analyze DeFi tokens for the purpose of investing.
+By mapping out transactions preceding a smart contracts' creation we can filter out projects with links to scams or market manipulation.
 
 ## User roles
 
@@ -24,6 +24,7 @@ In the initial version there will be only one user role. In the future it might 
 After compelting the initial version of the program, time permitting the aim is to implement some of the following ideas:
 
 - Users can save certain coins to their favourites/watchlist.
+- Database of Ethereum wallets which have created tokens that have turned out to be scams or otherwise manipulated.  
 - Connecting to decentralized exchanges to automatically buy a token if the contract passes certain red flag checks
 - Collecting information on the price of a token and plotting the price as a time-series. (Using dextools api for example)
 - Implementing differentiated features for paying/non-paying customers.
