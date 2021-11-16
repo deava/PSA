@@ -13,9 +13,11 @@ In the initial version there will be only one user role. In the future it might 
 
 ## Initial version functionality
 
-The initial version will update the list of most recently created contracts in the ethereum blockchain by calling the Ethscan API. Using the same API the program will then map relevant transactions of the ethereum smart contract creator wallet.
-The tool will visualize the different transactions and their respective wallet addresses as a graph with the wallet creating the contract as the root. 
-The graph edges will also include the sizes (# of ETH) of each transaction included on the graph. 
+- User can see updated the list of most recently created contracts in the ethereum blockchain 
+- User can select a smart contract from the list
+- User can see a visualisation of relevant transactions (including size) to and from the selected ethereum smart contract creator wallet.
+- User can adjust the maximum number of transactions between nodes (ethereum wallets)
+- User can input a different wallet to be the root node and the program will visualize transactions to and from that new wallet input
 
 ## Ideas for future development
 
