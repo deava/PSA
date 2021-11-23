@@ -1,11 +1,12 @@
-# Software Development Methods project
-University of Helsinki - Software Development Methods course project
+# Ethereum smart contract analysis tool 
+
+This tool helps analyse and visualise recently created smart contracts on the Ethereum blockchain.
 
 ## Documentation
 
-[Timekeeping]()
+[Timekeeping](documentation/timekeeping.md)
 
-[Requirements]()
+[Specification](documentation/specification.md)
 
 ## Exercises
 
