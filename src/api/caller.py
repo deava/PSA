@@ -1,5 +1,6 @@
 from etherscan import Etherscan
 from config import API
+from entities.contract import Contract
 
 class Caller:
     def __init__(self):
@@ -13,18 +14,16 @@ class Caller:
 
     def get_contract_creation_in_block(self,block_number):
         """
-        Checks whether there has been a contract created in a block.
+        Checks whether there has been a contract created in a block and saves that contract to a
         """
-
-        txInBlock = int(self.eth.get_proxy_block_transaction_count_by_number(block_number),0)
-        contract_addresses = []
-
+        contracts = []
         transactions = self.eth.get_proxy_block_by_number(block_number)["transactions"]
         for transaction in transactions:
             if transaction["to"] == None:
-                contract_addresses.append(self.eth.get_proxy_transaction_receipt(transaction["hash"])["contractAddress"])
-
-        return contract_addresses
+                transaction_info = self.eth.get_proxy_transaction_receipt(transaction["hash"])
+                token_name =  self.get_contract_information(transaction_info["contractAddress"])
+                contracts.append(Contract(transaction_info["contractAddress"],transaction_info["from"],token_name))
+        return contracts
 
     def get_contract_information(self,address):
         """
@@ -32,20 +31,22 @@ class Caller:
 
         Workaround to get token name without PRO API access
         """
-        return self.eth.get_erc20_token_transfer_events_by_contract_address_paginated(address,1,0,"desc")[0]
+        contract_source_code = self.eth.get_contract_source_code(address)
+        return contract_source_code[0]["ContractName"]
 
-    def get_name_of_contracts_created_recently(self,count):
+    def get_contracts_created_recently(self,count,starting_block = None):
         """
         Get contracts in the x most recent blocks of the ethereum blockchain.
-        
         """
         contracts = []
+
+        if not starting_block:
+            starting_block = self.get_block_number()
+
         for i in range(0,count):
-            hex_block_number= hex(int(self.get_block_number(),0)-i)
-            contract_addresses = self.get_contract_creation_in_block(hex_block_number)
-            for contract in contract_addresses:
-                contractInfo = self.get_contract_information(contract)
-                contracts.append((contractInfo["tokenName"],contractInfo["tokenSymbol"]))
+            hex_block_number= hex(int(starting_block,0)-i)
+            contracts.extend(self.get_contract_creation_in_block(hex_block_number))
+
         return contracts
         
 
