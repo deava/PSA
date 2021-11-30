@@ -1,4 +1,5 @@
 # Timekeeping
+Hours used in total: 17
 
 | Date | Time (hours) | What was done  |
 | :----:|:-----| :-----|
