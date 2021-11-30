@@ -5,7 +5,6 @@ from entities.contract import Contract
 from entities.transaction import Transaction
 from datetime import datetime
 
-
 class Caller:
     def __init__(self):
         self.eth = Etherscan(API)
@@ -82,7 +81,7 @@ class Caller:
         transactions = []
         for transaction in recent_transactions:
             timestamp = datetime.utcfromtimestamp(int(transaction["timeStamp"])).strftime('%Y-%m-%d %H:%M:%S')
-            transactions.append(Transaction(transaction["hash"],transaction["to"],transaction["from"],transaction["value"],transaction["gas"],timestamp))
+            transactions.append(Transaction(transaction["hash"],transaction["to"],transaction["from"],int(transaction["value"]),int(transaction["gas"]),timestamp))
         return transactions
 
 

@@ -1,6 +1,10 @@
 from invoke import task
 
 @task
+def build(ctx):
+    ctx.run("py src/initialize_database.py")
+
+@task
 def start(ctx):
     ctx.run("py src/app.py")
 @task
