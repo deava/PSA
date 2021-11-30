@@ -14,7 +14,8 @@ def drop_tables(connection):
 def create_tables(connection):
     cursor = connection.cursor()
 
-    cursor.execute('''create table transactions (date text, hash text, from_address text, to_address text, amount real, gas real);''')
+    cursor.execute(
+        '''create table transactions (date text, hash text, from_address text, to_address text, amount real, gas real);''')
 
     connection.commit()
 

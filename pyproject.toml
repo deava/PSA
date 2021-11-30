@@ -8,12 +8,12 @@ authors = ["Tuukka Tuomikoski <tuukka.tuomikoski@gmail.com>"]
 python = "^3.7"
 invoke = "^1.6.0"
 etherscan-python = "^2.1.0"
+pylint = "^2.12.1"
 
 [tool.poetry.dev-dependencies]
 pytest = "^6.2.5"
 coverage = "^6.1.2"
 pytest-dotenv = "^0.5.2"
-pylint = "^2.12.1"
 autopep8 = "^1.6.0"
 
 [build-system]

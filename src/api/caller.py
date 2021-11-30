@@ -5,6 +5,7 @@ from entities.contract import Contract
 from entities.transaction import Transaction
 from datetime import datetime
 
+
 class Caller:
     def __init__(self):
         self.eth = Etherscan(API)
@@ -53,8 +54,9 @@ class Caller:
         """
         contract_source_code = self.eth.get_contract_source_code(address)
         name = contract_source_code[0]["ContractName"]
-        creator_address = self.eth.get_erc20_token_transfer_events_by_contract_address_paginated(address,0,100,"asc")[0]["from"]
-        return [name,creator_address] 
+        creator_address = self.eth.get_erc20_token_transfer_events_by_contract_address_paginated(
+            address, 0, 100, "asc")[0]["from"]
+        return [name, creator_address]
 
     def get_contracts_created_recently(self, count, starting_block=None):
         """
@@ -73,19 +75,16 @@ class Caller:
 
         return contracts
 
-    def get_recent_transactions_of_address(self, address_hash, n = 10000):
+    def get_recent_transactions_of_address(self, address_hash, n=10000):
         """
         Gives the most recent transactions from a certain address.
         """
-        recent_transactions = self.eth.get_normal_txs_by_address(address_hash,0,99999999,"desc")[0:n]
+        recent_transactions = self.eth.get_normal_txs_by_address(
+            address_hash, 0, 99999999, "desc")[0:n]
         transactions = []
         for transaction in recent_transactions:
-            timestamp = datetime.utcfromtimestamp(int(transaction["timeStamp"])).strftime('%Y-%m-%d %H:%M:%S')
-            transactions.append(Transaction(transaction["hash"],transaction["to"],transaction["from"],int(transaction["value"]),int(transaction["gas"]),timestamp))
+            timestamp = datetime.utcfromtimestamp(
+                int(transaction["timeStamp"])).strftime('%Y-%m-%d %H:%M:%S')
+            transactions.append(Transaction(transaction["hash"], transaction["to"], transaction["from"], int(
+                transaction["value"]), int(transaction["gas"]), timestamp))
         return transactions
-
-
-
-
-
-

@@ -7,9 +7,11 @@ def build(ctx):
 @task
 def start(ctx):
     ctx.run("py src/app.py")
+
 @task
 def test(ctx):
     ctx.run("pytest src")
+
 @task
 def coverage(ctx):
     ctx.run("coverage run --branch -m pytest src")
@@ -19,7 +21,7 @@ def coverage_report(ctx):
     ctx.run("coverage html")
 
 @task
-def pylint(ctx):
+def lint(ctx):
     ctx.run("pylint src")
 
 @task
