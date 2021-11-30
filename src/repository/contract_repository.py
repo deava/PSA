@@ -1,6 +1,7 @@
 from database_connection import get_database_connection
-from api.caller import Caller
 
 
 class ContractRepository:
-    def __init__(self):
+    def __init__(self,connection):
+        self._connection = connection
+
