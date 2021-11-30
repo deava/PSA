@@ -8,4 +8,6 @@ This tool helps analyse and visualise recently created smart contracts on the Et
 
 [Specification](documentation/specification.md)
 
+[Architecture](documentation/architecture.md)
+
 
