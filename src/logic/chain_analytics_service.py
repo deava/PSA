@@ -26,6 +26,7 @@ class ChainAnalyticsService:
         if contracts:
             for contract in contracts:
                 self._contract_repository.add(contract)
+        return contracts
 
     def get_contracts_in_db(self):
         return self._contract_repository.find_all()

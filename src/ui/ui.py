@@ -41,8 +41,7 @@ class UI:
         print(running)
         if running:
             print("checking")
-            chain_analytics_service.add_new_contract_to_db_from_most_recent_block()
-            contracts = chain_analytics_service.get_contracts_in_db()
+            contracts = chain_analytics_service.add_new_contract_to_db_from_most_recent_block()
             self._string_var.set("\n".join(contracts))
         self._root.after(1000,self._create_list_of_contracts_continuous)
 
