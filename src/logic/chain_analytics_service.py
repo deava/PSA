@@ -22,7 +22,7 @@ class ChainAnalyticsService:
         return self._transaction_repository.find_all()
 
     def add_new_contract_to_db_from_block_number(self,block_number = 12774364):
-        contracts = self.caller.get_contract_creation_in_block(block_number)
+        contracts = self.caller.get_contract_creation_in_block(hex(block_number))
         if contracts:
             for contract in contracts:
                 self._contract_repository.add(contract)
