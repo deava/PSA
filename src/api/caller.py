@@ -43,7 +43,7 @@ class Caller:
                 token_name = self.get_contract_information(
                     transaction_info["contractAddress"])[0]
                 contracts.append(Contract(
-                    transaction_info["contractAddress"], transaction_info["from"], token_name))
+                    transaction_info["contractAddress"],transaction["hash"], transaction_info["from"], int(transaction_info["blockNumber"],16), token_name))
         return contracts
 
     def get_contract_information(self, address):
@@ -79,8 +79,9 @@ class Caller:
         """
         Gives the most recent transactions from a certain address.
         """
+        MAX_BLOCK = 99999999
         recent_transactions = self.eth.get_normal_txs_by_address(
-            address_hash, 0, 99999999, "desc")[0:n]
+            address_hash, 0, MAX_BLOCK, "desc")[0:n]
         transactions = []
         for transaction in recent_transactions:
             timestamp = datetime.utcfromtimestamp(

@@ -11,8 +11,7 @@ def main():
     creator = caller.get_contract_information(
         "0xf613D5E51450bfAbCB59d8c31A3f4BD9A0358Ee7")[1]
     analytics.add_transactions_to_db(creator)
-    for transaction in analytics.get_transactions_in_db():
-        print(*transaction)
+    print(*analytics.get_contracts_in_db())
 
 
 if __name__ == "__main__":

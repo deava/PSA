@@ -8,6 +8,9 @@ def drop_tables(connection):
         drop table if exists transactions;
     ''')
 
+    cursor.execute('''
+        drop table if exists contracts;
+    ''')
     connection.commit()
 
 
@@ -16,6 +19,9 @@ def create_tables(connection):
 
     cursor.execute(
         '''create table transactions (date text, hash text, from_address text, to_address text, amount real, gas real);''')
+
+    cursor.execute(
+        '''create table contracts (date text, hash text, creator_address text, contract_address text, name text);''')
 
     connection.commit()
 
