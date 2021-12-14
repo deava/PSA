@@ -7,6 +7,12 @@ from datetime import datetime
 
 
 class Caller:
+    """
+    Class that connects to the Etherscan API and parses the API calls results to a usable form.
+
+    Attributes: 
+        eth: Connection to the Etherscan API
+    """
     def __init__(self):
         self.eth = Etherscan(API)
 
@@ -31,7 +37,12 @@ class Caller:
 
     def get_contract_creation_in_block(self, block_number):
         """
-        Checks whether there has been a contract created in a block and saves that contract to a
+        Checks whether there has been a contract created in a block and creates a Contract entity
+        and appends it to the returnable contracts list.
+        Args:
+            block_number: the number (in hex) of the block in the Ethereum blockchain to scan for a smart contract.    
+        Returns:
+            Contracts found, if any, in the block in question.
         """
         contracts = []
         transactions = self.eth.get_proxy_block_by_number(block_number)[
@@ -49,8 +60,11 @@ class Caller:
     def get_contract_information(self, address):
         """
         Returns information about the token, such as name based on the contract address given.
-
         Workaround to get token name without PRO API access
+            Args:
+            address: address of the contract in the Ethereum blockchain.
+        Returns:
+            The name and address of the creator wallet of the smart contract as a list.
         """
         contract_source_code = self.eth.get_contract_source_code(address)
         name = contract_source_code[0]["ContractName"]
@@ -61,6 +75,11 @@ class Caller:
     def get_contracts_created_recently(self, count, starting_block=None):
         """
         Get contracts in the x most recent blocks of the ethereum blockchain.
+        Args:
+            count: defines how many blocks back from the starting point we go
+            starting_block: if defined, the block to start the contract scanning from, otherwise default to most recent block
+        Returns:
+            List of the contracts created recently, as defined by the starting block and amount of blocks that we scanned back.
         """
         contracts = []
 
@@ -75,13 +94,17 @@ class Caller:
 
         return contracts
 
-    def get_recent_transactions_of_address(self, address_hash, n=10000):
+    def get_recent_transactions_of_address(self, address_hash, transaction_count=10000):
         """
         Gives the most recent transactions from a certain address.
+        Args:
+            address_hash: The address to scan transactions from
+            transaction_count: How many transactions at most to include in the return 
+            (returns fewer transactions than transaction_count implies if fewer available).
         """
         MAX_BLOCK = 99999999
         recent_transactions = self.eth.get_normal_txs_by_address(
-            address_hash, 0, MAX_BLOCK, "desc")[0:n]
+            address_hash, 0, MAX_BLOCK, "desc")[0:transaction_count]
         transactions = []
         for transaction in recent_transactions:
             timestamp = datetime.utcfromtimestamp(

@@ -27,6 +27,10 @@ def create_tables(connection):
 
 
 def initialize_database():
+    """
+    Initializes the database by getting a connection 
+    """
+
     connection = get_database_connection()
 
     drop_tables(connection)

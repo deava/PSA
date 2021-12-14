@@ -20,7 +20,10 @@ class TransactionRepository:
 
     def find_all(self):
         """
-        Finds all transactions
+        Finds all transactions.
+        
+        Returns:
+            Transactions found in the database.
         """
 
         cursor = self._connection.cursor()

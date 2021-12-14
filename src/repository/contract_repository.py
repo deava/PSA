@@ -18,7 +18,10 @@ class ContractRepository:
 
     def find_all(self):
         """
-        Finds all transactions
+        Finds all contracts.
+        
+        Returns:
+            Contracts found in the database.
         """
 
         cursor = self._connection.cursor()
