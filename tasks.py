@@ -2,11 +2,11 @@ from invoke import task
 
 @task
 def build(ctx):
-    ctx.run("py src/initialize_database.py")
+    ctx.run("python src/initialize_database.py")
 
 @task
 def start(ctx):
-    ctx.run("py src/app.py")
+    ctx.run("python src/app.py")
 
 @task
 def test(ctx):

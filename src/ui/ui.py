@@ -5,10 +5,7 @@ class UI:
     def __init__(self, root):
         self._root = root
         self._string_var = StringVar()
-        self._str_var = StringVar()
-        self._str_var.set("0")
-
-
+        self._contracts = []
 
     def start(self):
         label = ttk.Label(master=self._root, text="Scan new contracts in the ethereum blockchain")
@@ -26,25 +23,16 @@ class UI:
         )
 
         contract_list = ttk.Label(master = self._root, textvariable= self._string_var)
-        iterator_debug = ttk.Label(master = self._root, textvariable= self._str_var)
         label.grid(row=0)
         button_start.grid(row=1,column=0)
         button_stop.grid(row=1,column=1)
         contract_list.grid(row=2)
-        iterator_debug.grid(row=3)
 
     def _create_list_of_contracts(self):
-        print("checking")
-        self._str_var.set(self._str_var.get()+"\n"+"1")
+        self._contracts.append(*chain_analytics_service.add_new_contract_to_db_from_block_number(13660022))
+        text = "\n".join(map(str,self._contracts))
+        self._string_var.set(self._string_var.get()+"1")
         
-    def _create_list_of_contracts_continuous(self):
-        print(running)
-        if running:
-            print("checking")
-            contracts = chain_analytics_service.add_new_contract_to_db_from_most_recent_block()
-            self._string_var.set("\n".join(contracts))
-        self._root.after(1000,self._create_list_of_contracts_continuous)
-
     def _on_start(self):
         global running
         running = True

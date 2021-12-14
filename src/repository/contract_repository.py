@@ -1,5 +1,4 @@
 from database_connection import get_database_connection
-from entities.contract import Contract
 
 
 class ContractRepository:
