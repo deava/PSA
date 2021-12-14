@@ -10,7 +10,7 @@ Hours used in total: 33
 | 30.11. | 5    | Implemented sqlite integration, implemented more API calls, started work on service to separate app logic, created transaction repository to interact with database. Added pylint, created architecture UML map. |
 | 6.12. | 4   | Refactoring and debugging |
 | 7.12. | 3   | Sequence chart creation, implementing contract creation to database adding tests to contract creation |
-| 13.12. | 4   | Debugging, docstring description|
-| 14.12. | 5   | Architecture description, user guide, more testing |
+| 13.12. | 4   | Debugging tkinter, refactoring |
+| 14.12. | 5   | Architecture description, user guide, docstring |
 
 
