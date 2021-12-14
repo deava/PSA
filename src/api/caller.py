@@ -20,7 +20,8 @@ class Caller:
         return self.eth.get_proxy_block_number()
 
     def get_transaction_information(self, hash):
-        return self.eth.get_proxy_transaction_by_hash(hash)
+        transaction_information = self.eth.get_proxy_transaction_by_hash(hash)
+        return Transaction(hash,transaction_information["to"],transaction_information["from"],transaction_information["value"],transaction_information["gas"],transaction_information["blockNumber"]) 
 
     def run_continuous_scan(self):
         """
@@ -52,7 +53,7 @@ class Caller:
                 transaction_info = self.eth.get_proxy_transaction_receipt(
                     transaction["hash"])
                 token_name = self.get_contract_information(
-                    transaction_info["contractAddress"])[0]
+                    transaction_info["contractAddress"]).name
                 contracts.append(Contract(
                     transaction_info["contractAddress"],transaction["hash"], transaction_info["from"], int(transaction_info["blockNumber"],16), token_name))
         return contracts
@@ -64,17 +65,20 @@ class Caller:
             Args:
             address: address of the contract in the Ethereum blockchain.
         Returns:
-            The name and address of the creator wallet of the smart contract as a list.
+            Contract object representing the contract found in the Ethereum blockchain in the address given as argument.
         """
+
         contract_source_code = self.eth.get_contract_source_code(address)
         name = contract_source_code[0]["ContractName"]
-        creator_address = self.eth.get_erc20_token_transfer_events_by_contract_address_paginated(
-            address, 0, 100, "asc")[0]["from"]
-        return [name, creator_address]
+        first_transaction = self.eth.get_erc20_token_transfer_events_by_contract_address_paginated(
+            address, 0, 100, "asc")[0]
+
+        return Contract(address,first_transaction["hash"],first_transaction["from"],first_transaction["timeStamp"],name) 
 
     def get_contracts_created_recently(self, count, starting_block=None):
         """
         Get contracts in the x most recent blocks of the ethereum blockchain.
+
         Args:
             count: defines how many blocks back from the starting point we go
             starting_block: if defined, the block to start the contract scanning from, otherwise default to most recent block
@@ -112,3 +116,4 @@ class Caller:
             transactions.append(Transaction(transaction["hash"], transaction["to"], transaction["from"], int(
                 transaction["value"]), int(transaction["gas"]), timestamp))
         return transactions
+

@@ -41,6 +41,16 @@ class ChainAnalyticsService:
         transactions = self.caller.get_recent_transactions_of_address(address)
         for transaction in transactions:
             self._transaction_repository.add(transaction)
+    
+    def add_transaction_to_db(self,transaction_hash):
+        """
+        Adds transaction from given hash to database
+        Args: 
+            transaction_hash: Hash value of the transaction in the Ethereum blockchain
+        """
+        transaction = self.caller.get_transaction_information(transaction_hash)
+        if transaction:
+            self._transaction_repository.add(transaction)
 
     def get_transactions_in_db(self):
         """
@@ -58,16 +68,17 @@ class ChainAnalyticsService:
         Returns:
             List of contracts created in the block and which were added to the database.
         """
-        contracts = self.caller.get_contract_creation_in_block(hex(block_number))
+        contracts = self.caller.get_contract_information(contract_address)
         if contracts:
-            for contract in contracts:
-                self._contract_repository.add(contract)
+            self._contract_repository.add(contract)
         return contracts
 
     def add_new_contract_to_db_from_block_number(self,block_number = 12774364):
         """
+        Adds all contracts created at a given block number to the database
+
         Args:
-            block_number: 
+            block_number: Number of the ethereum block to start scanning at.
         Returns:
             List of contracts created in the block and which were added to the database.
         """

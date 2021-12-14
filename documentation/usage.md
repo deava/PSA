@@ -31,6 +31,6 @@ pip install etherscan-python
 
 # Running the app
 
-## Start scanning view
+After running poetry invoke start you are prompted with a text ui in the console. This is a placeholder until the graphical ui is finished. The commands currently on offer are. Stop running, Get all contracts in database, get all transactions in the database, add new contract to the database, add a new transaction to the database. Below is an illustrative photo of the functioning of the app:
 
-## Get recent transactions to and from the contract
+![Photo](./photos/usage.png)
