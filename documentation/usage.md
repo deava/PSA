@@ -58,3 +58,5 @@ The contract view functions similarly to the transaction view.
 One can input an valid contract address and add a contract from that address to the database.
 Alternatively you can input a valid block number and scan that block for a contract creations. 
 If there are any these are then added to the database.
+
+Here too, the user can right click to copy the transaction hash and contract address and also scroll down to view more contracts, if not all are visible.

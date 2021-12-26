@@ -22,6 +22,11 @@ class TestChainAnalyticsRepository(unittest.TestCase):
         first_contract = self.analytics.get_contracts_in_db()[0]
         self.assertEqual(first_contract.name, "oozaruinu")
 
+    def test_add_transaction_to_db(self):
+        self.analytics.add_transaction_to_db("0x5736abf414c73452f7ff2dcb49c99fef04d84eac136a27c98922693c0ca406cd")
+        transactions = self.analytics.get_transactions_in_db()
+        self.assertEqual(len(transactions), 1)
+
     def test_get_contracts_in_db(self):
         self.analytics.add_new_contract_to_db_from_block_number(13660022)
         contracts = self.analytics.get_contracts_in_db()

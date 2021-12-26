@@ -10,6 +10,8 @@ This tool helps analyse and visualise recently created smart contracts on the Et
 
 [Architecture](documentation/architecture.md)
 
+[Testing](documentation/testing.md)
+
 [User guide](documentation/usage.md)
 
 ## Usage
