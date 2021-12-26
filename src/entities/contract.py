@@ -21,6 +21,3 @@ class Contract:
         self.creator_address = creator_address
         self.creation_timestamp = timestamp
         self.name = name
-
-    def __str__(self):
-        return f"{self.creation_timestamp},{self.name},{self.contract_address},{self.creator_address},{self.transaction_hash}"

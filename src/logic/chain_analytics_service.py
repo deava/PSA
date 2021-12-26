@@ -25,12 +25,9 @@ class ChainAnalyticsService:
         self.caller = Caller()
         self._transaction_repository = transaction_repository
         self._contract_repository = contract_repository
-
-    def get_sorted_transaction_list_by_amount(self, transactions):
-        """
+        self._hash_set = set([transaction.transaction_hash for transaction in self._transaction_repository.find_all()])
+        self._hash_set.update([contract.transaction_hash for contract in self._contract_repository.find_all()])
         
-        """
-        pass
 
     def add_transactions_to_db(self, address):
         """
@@ -40,7 +37,10 @@ class ChainAnalyticsService:
         """
         transactions = self.caller.get_recent_transactions_of_address(address)
         for transaction in transactions:
-            self._transaction_repository.add(transaction)
+            if transaction.transaction_hash not in self._hash_set:
+                self._transaction_repository.add(transaction)
+                self._hash_set.add(transaction.transaction_hash)
+        return transactions
     
     def add_transaction_to_db(self,transaction_hash):
         """
@@ -95,5 +95,13 @@ class ChainAnalyticsService:
             List of all the contracts saved in the database.
         """
         return self._contract_repository.find_all()
+    
+    def get_current_block_id(self):
+        """
+        Gets the ordinal value of the most recent block in the ethereum blockchain.
+        Returns:
+            Most recent block number.
+        """
+        return self.caller.get_block_number()
 
 chain_analytics_service = ChainAnalyticsService()

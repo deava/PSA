@@ -25,9 +25,3 @@ class Transaction:
         self.amount = amount
         self.gas_fee = gas_fee
         self.timestamp = timestamp
-
-    def __str__(self):
-        return f"Timestamp: {self.timestamp}, Transaction hash: {self.transaction_hash}, from address: {self.to_address}, to_address {self.to_address}, amount (in Wei) {self.amount}"
-
-    def __repr__(self):
-        return f"Timestamp: {self.timestamp}, Transaction hash: {self.transaction_hash}, from address: {self.to_address}, to_address {self.to_address}, amount (in Wei) {self.amount}"

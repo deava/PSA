@@ -1,13 +1,16 @@
-from typing import Text
-from api.caller import Caller
-from entities.transaction import Transaction
-from ui.text_ui import TextUI
-from logic.chain_analytics_service import ChainAnalyticsService
+from tkinter import Tk
+from ui.ui import UI
+from ui.menu import MenuBar
 
 
 def main():
-    ui = TextUI()
+    window = Tk()
+    window.title("Ethereum blockchain transaction analyzer")
+    ui = UI(window)
     ui.start()
+
+    window.mainloop()
+
 
 if __name__ == "__main__":
     main()

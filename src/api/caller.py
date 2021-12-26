@@ -23,19 +23,6 @@ class Caller:
         transaction_information = self.eth.get_proxy_transaction_by_hash(hash)
         return Transaction(hash,transaction_information["to"],transaction_information["from"],transaction_information["value"],transaction_information["gas"],transaction_information["blockNumber"]) 
 
-    def run_continuous_scan(self):
-        """
-        Every 5 seconds calls the get_contract_creation_in_block to see if there has
-        been a contract created in the recent block
-        """
-        while True:
-            sleep(3 - time() % 3)
-            block_number = self.get_block_number()
-            print(int(block_number, 0))
-            contracts = self.get_contract_creation_in_block(block_number)
-            if len(contracts) != 0:
-                print(int(block_number, 0), [str(x) for x in contracts])
-
     def get_contract_creation_in_block(self, block_number):
         """
         Checks whether there has been a contract created in a block and creates a Contract entity
@@ -98,7 +85,7 @@ class Caller:
 
         return contracts
 
-    def get_recent_transactions_of_address(self, address_hash, transaction_count=10000):
+    def get_recent_transactions_of_address(self, address_hash, transaction_count=100):
         """
         Gives the most recent transactions from a certain address.
         Args:

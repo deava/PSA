@@ -1,38 +1,55 @@
 from tkinter import Tk, ttk, StringVar
 from entities import contract
 from logic.chain_analytics_service import chain_analytics_service
+from ui.new_transactions_view import NewEventsView
+from ui.menu import MenuBar
+from ui.saved_contracts_view import ContractsView
+from ui.wallet_transaction_view import TransactionView
 class UI:
     def __init__(self, root):
         self._root = root
-        self._string_var = StringVar()
-        self._contracts = []
+        self._current_view = None
+        self._string_var = StringVar()        
+        menubar = MenuBar(root,self._show_new_events_view,self._show_contracts_view).menubar
+        root.config(menu=menubar)
 
     def start(self):
-        label = ttk.Label(master=self._root, text="Scan new contracts in the ethereum blockchain")
+        self._show_new_events_view()
 
-        button_start = ttk.Button(
-          master=self._root,
-          text="Start scanning",
-          command=self._create_list_of_contracts()
-        )
+    def _create_list_of_transactions(self,wallet_id):
+        entry_value = wallet_id
+        print(entry_value)
+        if entry_value:
+            transactions = chain_analytics_service.add_transactions_to_db(str(entry_value))
+            print("Added", len(transactions)," transactions to database",entry_value)
 
-        button_stop = ttk.Button(
-          master=self._root,
-          text="Stop scanning",
-          command=self._on_stop()
-        )
+    def _filter_database_contents(self):
+        print(chain_analytics_service.get_transactions_in_db())
 
-        contract_list = ttk.Label(master = self._root, textvariable= self._string_var)
-        label.grid(row=0)
-        button_start.grid(row=1,column=0)
-        button_stop.grid(row=1,column=1)
-        contract_list.grid(row=2)
-
-    def _create_list_of_contracts(self):
-        self._contracts.append(*chain_analytics_service.add_new_contract_to_db_from_block_number(13660022))
-        text = "\n".join(map(str,self._contracts))
-        self._string_var.set(self._string_var.get()+"1")
+    def _show_new_events_view(self):
         
+        self._hide_current_view()
+
+        self._current_view = NewEventsView(
+            self._root,
+            self._create_list_of_transactions,
+            self._filter_database_contents
+        )
+
+        self._current_view.pack()
+    
+    def _show_contracts_view(self):
+        self._hide_current_view()
+        self._current_view = ContractsView(self._root)
+        self._current_view.pack()
+
+    def _hide_current_view(self):
+        if self._current_view:
+            self._current_view.destroy()
+
+        self._current_view = None
+
+    
     def _on_start(self):
         global running
         running = True
@@ -40,12 +57,3 @@ class UI:
     def _on_stop(self):
         global running
         running = False
-
-
-window = Tk()
-window.title("TkInter example")
-
-ui = UI(window)
-ui.start()
-
-window.mainloop()

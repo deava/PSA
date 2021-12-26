@@ -1,5 +1,5 @@
 from database_connection import get_database_connection
-
+from entities.contract import Contract
 
 class ContractRepository:
     def __init__(self,connection):
@@ -30,6 +30,8 @@ class ContractRepository:
 
         contracts = cursor.fetchall()
 
+        contracts = [Contract(contract[3],contract[1],contract[2],contract[0],contract[4]) for contract in contracts]
+        
         return contracts
 
 

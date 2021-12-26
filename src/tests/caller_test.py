@@ -5,6 +5,7 @@ from api.caller import Caller
 class TestCaller(unittest.TestCase):
     def setUp(self):
         self.caller = Caller()
+        
 
     def test_get_contract_information(self):
         contract_name = self.caller.get_contract_information(
