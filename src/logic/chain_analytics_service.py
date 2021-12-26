@@ -1,5 +1,4 @@
 from api.caller import Caller
-from entities import contract
 from repository.transaction_repository import transaction_repository
 from repository.contract_repository import contract_repository
 
@@ -68,10 +67,10 @@ class ChainAnalyticsService:
         Returns:
             List of contracts created in the block and which were added to the database.
         """
-        contracts = self.caller.get_contract_information(contract_address)
-        if contracts:
+        contract = self.caller.get_contract_information(contract_address) 
+        if contract:
             self._contract_repository.add(contract)
-        return contracts
+        return contract
 
     def add_new_contract_to_db_from_block_number(self,block_number = 12774364):
         """

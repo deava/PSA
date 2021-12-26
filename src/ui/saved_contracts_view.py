@@ -1,4 +1,4 @@
-from tkinter import Tk, ttk, constants
+from tkinter import Tk, ttk, constants, END
 from logic.chain_analytics_service import chain_analytics_service
 
 class ContractsView:
@@ -6,7 +6,7 @@ class ContractsView:
         self._root = root
         self._frame = None
         self._block_id = None
-        self._current_block_id = chain_analytics_service.get_current_block_id()
+        self._current_block_id = str(int(chain_analytics_service.get_current_block_id(),0))
         self._intitialize()
     
     def pack(self):
@@ -17,16 +17,23 @@ class ContractsView:
 
     def _intitialize(self):
         self._frame = ttk.Frame(master = self._root)
-        
+
         addressLabel = ttk.Label(master = self._frame, text = "Contract address")
         blockLabel = ttk.Label(master = self._frame, text = "BlockId to start from")
         self._address_hash = ttk.Entry(master=self._frame)
         self._block_id = ttk.Entry(master=self._frame)
+        self._block_id.insert(END,self._current_block_id)
 
         button_find = ttk.Button(
           master=self._frame,
           text="Find contracts created in the last 10 blocks",
-          command=lambda: self._contract_finder(str(self._block_id.get()))
+          command=lambda: self._contract_finder_by_block(str(self._block_id.get()))
+        )
+
+        button_find_contract = ttk.Button(
+          master=self._frame,
+          text="Add contract from address",
+          command=lambda: self._contract_finder_by_address(self._address_hash.get())
         )
 
         button_database = ttk.Button(
@@ -34,14 +41,17 @@ class ContractsView:
           text="Get everything in database",
           command=lambda: self._show_all_contracts()
         )
+
         addressLabel.grid(row=0,column=0)
-        button_find.grid(row=0,column=1)
+        self._address_hash.grid(row=0,column=1)
         blockLabel.grid(row=1,column=0)
         self._block_id.grid(row=1,column=1)
-        button_database.grid(row=0,column=2)
-        
+
+        button_database.grid(row=2,column=0)
+        button_find.grid(row=2,column=1)
+        button_find_contract.grid(row=2,column=2)
         frame_contracts = ttk.Frame(master = self._frame)
-        frame_contracts.grid(row=3)
+        frame_contracts.grid(row=4)
         columns = ["Timestamp","Name","Transaction hash","Contract address","Creator address"]
         self._contract_list = ttk.Treeview(master = frame_contracts,columns = columns,show="headings")
         self._contract_list.grid(row=1,column=0)
@@ -58,9 +68,14 @@ class ContractsView:
             self._contract_list.insert('','end',values=(contract.creation_timestamp,contract.name,contract.transaction_hash,contract.contract_address,contract.creator_address))
 
 
-    def _contract_finder(self):
-        contracts_found = chain_analytics_service.add_new_contract_to_db_from_block_number(self._block_id.get())
+    def _contract_finder_by_block(self,block_id):
+        chain_analytics_service.add_new_contract_to_db_from_block_number(int(block_id,0))
         self._show_all_contracts()
+
+    def _contract_finder_by_address(self,address):
+        chain_analytics_service.add_new_contract_to_db_with_contract_address(address)
+        self._show_all_contracts()
+
 
     def clipboard(self,event):
         tree = self._contract_list

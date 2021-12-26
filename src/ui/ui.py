@@ -4,7 +4,6 @@ from logic.chain_analytics_service import chain_analytics_service
 from ui.new_transactions_view import NewEventsView
 from ui.menu import MenuBar
 from ui.saved_contracts_view import ContractsView
-from ui.wallet_transaction_view import TransactionView
 class UI:
     def __init__(self, root):
         self._root = root
