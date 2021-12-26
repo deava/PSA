@@ -1,6 +1,7 @@
 from database_connection import get_database_connection
 from entities.transaction import Transaction
 
+
 class TransactionRepository:
 
     def __init__(self, connection):
@@ -21,7 +22,7 @@ class TransactionRepository:
     def find_all(self):
         """
         Finds all transactions.
-        
+
         Returns:
             Transactions found in the database.
         """
@@ -32,7 +33,8 @@ class TransactionRepository:
 
         transactions = cursor.fetchall()
 
-        transactions = [Transaction(transaction[1],transaction[3],transaction[2],transaction[4],transaction[5],transaction[0]) for transaction in transactions]
+        transactions = [Transaction(transaction[1], transaction[3], transaction[2],
+                                    transaction[4], transaction[5], transaction[0]) for transaction in transactions]
 
         return transactions
 

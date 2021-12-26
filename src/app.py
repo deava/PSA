@@ -1,6 +1,5 @@
 from tkinter import Tk
 from ui.ui import UI
-from ui.menu import MenuBar
 
 
 def main():

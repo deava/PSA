@@ -9,6 +9,7 @@ COMMANDS = {
 
 }
 
+
 class TextUI:
     def __init__(self):
         self._service = ChainAnalyticsService()
@@ -22,18 +23,17 @@ class TextUI:
             if not command in COMMANDS:
                 print("Wrong command, try again")
                 continue
-        
+
             if command == "x":
-               break
+                break
             if command == "1":
                 print(self._service.get_contracts_in_db())
             if command == "2":
                 print(self._service.get_transactions_in_db())
             if command == "3":
                 address = input("Give contract address:")
-                print(self._service.add_new_contract_to_db_with_contract_address(address))
+                print(
+                    self._service.add_new_contract_to_db_with_contract_address(address))
             if command == "4":
-                hash = input("Give transaction hash:") 
+                hash = input("Give transaction hash:")
                 print(self._service.add_transaction_to_db(hash))
-                
-    

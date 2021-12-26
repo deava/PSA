@@ -1,10 +1,11 @@
 from database_connection import get_database_connection
 from entities.contract import Contract
 
+
 class ContractRepository:
-    def __init__(self,connection):
+    def __init__(self, connection):
         self._connection = connection
-    
+
     def add(self, contract):
         """
         Saves contract into the database.
@@ -12,14 +13,15 @@ class ContractRepository:
 
         cursor = self._connection.cursor()
 
-        cursor.execute('insert into contracts values (?, ?, ?, ?, ?)', (contract.creation_timestamp, contract.transaction_hash, contract.creator_address, contract.contract_address, contract.name))
+        cursor.execute('insert into contracts values (?, ?, ?, ?, ?)', (contract.creation_timestamp,
+                       contract.transaction_hash, contract.creator_address, contract.contract_address, contract.name))
 
         self._connection.commit()
 
     def find_all(self):
         """
         Finds all contracts.
-        
+
         Returns:
             Contracts found in the database.
         """
@@ -30,8 +32,9 @@ class ContractRepository:
 
         contracts = cursor.fetchall()
 
-        contracts = [Contract(contract[3],contract[1],contract[2],contract[0],contract[4]) for contract in contracts]
-        
+        contracts = [Contract(contract[3], contract[1], contract[2],
+                              contract[0], contract[4]) for contract in contracts]
+
         return contracts
 
 

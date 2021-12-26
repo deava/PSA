@@ -1,18 +1,20 @@
 class Contract:
     """Defines a contract data object.
-    Attributes: 
+    Attributes:
         contract_address: Address of the contract in the Ethereum blockchain.
         transaction_hash: Identifier for the transaction in the Ethereum blockchain.
         creator_address: Ethereum blockchain address of the wallet that created the smart contract.
         timestamp: Time that the contract was created.
         name: Name of the smart contract, if available.
     """
+
     def __init__(self, contract_address, transaction_hash, creator_address, timestamp, name=None):
         """Constructor of the class. Creates a Contract entity.
-        Args: 
+        Args:
             contract_address: Address of the contract in the Ethereum blockchain.
             transaction_hash: Identifier for the transaction in the Ethereum blockchain.
-            creator_address: Ethereum blockchain address of the wallet that created the smart contract.
+            creator_address: Ethereum blockchain address of
+            the wallet that created the smart contract.
             timestamp: Time that the contract was created.
             name: Name of the smart contract, if available.
         """
@@ -21,3 +23,6 @@ class Contract:
         self.creator_address = creator_address
         self.creation_timestamp = timestamp
         self.name = name
+
+    def __str__(self):
+        return f"{self.creation_timestamp},{self.name},{self.contract_address},{self.creator_address},{self.transaction_hash}"

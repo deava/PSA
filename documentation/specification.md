@@ -14,9 +14,8 @@ In the initial version there will be only one user role. In the future it might 
 ## Initial version functionality
 
 - User can see updated the list of most recently created contracts in the ethereum blockchain [x]
-- User can select a smart contract from a list 
+- User can select a smart contract from a list [x]
 - User can see a visualisation of relevant transactions (including size) to and from the selected ethereum smart contract creator wallet. [x]
-- User can adjust the maximum number of transactions between nodes (ethereum wallets)
 - User can input a different wallet to be the root node and the program will visualize transactions to and from that new wallet input [x]
 
 ## Ideas for future development

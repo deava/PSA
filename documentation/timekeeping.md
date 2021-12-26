@@ -1,5 +1,5 @@
 # Timekeeping
-Hours used in total: 33
+Hours used in total: 41
 
 | Date | Time (hours) | What was done  |
 | :----:|:-----| :-----|
@@ -12,5 +12,6 @@ Hours used in total: 33
 | 7.12. | 3   | Sequence chart creation, implementing contract creation to database adding tests to contract creation |
 | 13.12. | 4   | Debugging tkinter, refactoring |
 | 14.12. | 5   | Architecture description, user guide, docstring |
+| 26.12. | 8   | Documentation, testing, UI implementation |
 
 

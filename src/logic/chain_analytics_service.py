@@ -12,6 +12,7 @@ class ChainAnalyticsService:
         _transaction_repository: Transaction repository, allows us to communicate with the database's transactions table.
         _contract_repository: Contract repository, allows us to communicate with the database's contracts table.
     """
+
     def __init__(self):
         """
         Constructor for the class.
@@ -24,9 +25,10 @@ class ChainAnalyticsService:
         self.caller = Caller()
         self._transaction_repository = transaction_repository
         self._contract_repository = contract_repository
-        self._hash_set = set([transaction.transaction_hash for transaction in self._transaction_repository.find_all()])
-        self._hash_set.update([contract.transaction_hash for contract in self._contract_repository.find_all()])
-        
+        self._hash_set = set(
+            [transaction.transaction_hash for transaction in self._transaction_repository.find_all()])
+        self._hash_set.update(
+            [contract.transaction_hash for contract in self._contract_repository.find_all()])
 
     def add_transactions_to_db(self, address):
         """
@@ -40,11 +42,11 @@ class ChainAnalyticsService:
                 self._transaction_repository.add(transaction)
                 self._hash_set.add(transaction.transaction_hash)
         return transactions
-    
-    def add_transaction_to_db(self,transaction_hash):
+
+    def add_transaction_to_db(self, transaction_hash):
         """
         Adds transaction from given hash to database
-        Args: 
+        Args:
             transaction_hash: Hash value of the transaction in the Ethereum blockchain
         """
         transaction = self.caller.get_transaction_information(transaction_hash)
@@ -59,20 +61,20 @@ class ChainAnalyticsService:
         """
         return self._transaction_repository.find_all()
 
-    def add_new_contract_to_db_with_contract_address(self,contract_address):
+    def add_new_contract_to_db_with_contract_address(self, contract_address):
         """
         Adds a new contract to the database given the address of the contract in the ETH blockchain
         Args:
-            contract_address: Ethereum blockchain address of the contract to be added. 
+            contract_address: Ethereum blockchain address of the contract to be added.
         Returns:
             List of contracts created in the block and which were added to the database.
         """
-        contract = self.caller.get_contract_information(contract_address) 
+        contract = self.caller.get_contract_information(contract_address)
         if contract:
             self._contract_repository.add(contract)
         return contract
 
-    def add_new_contract_to_db_from_block_number(self,block_number = 12774364):
+    def add_new_contract_to_db_from_block_number(self, block_number=12774364):
         """
         Adds all contracts created at a given block number to the database
 
@@ -81,7 +83,8 @@ class ChainAnalyticsService:
         Returns:
             List of contracts created in the block and which were added to the database.
         """
-        contracts = self.caller.get_contract_creation_in_block(hex(block_number))
+        contracts = self.caller.get_contract_creation_in_block(
+            hex(block_number))
         if contracts:
             for contract in contracts:
                 self._contract_repository.add(contract)
@@ -94,7 +97,7 @@ class ChainAnalyticsService:
             List of all the contracts saved in the database.
         """
         return self._contract_repository.find_all()
-    
+
     def get_current_block_id(self):
         """
         Gets the ordinal value of the most recent block in the ethereum blockchain.
@@ -102,5 +105,6 @@ class ChainAnalyticsService:
             Most recent block number.
         """
         return self.caller.get_block_number()
+
 
 chain_analytics_service = ChainAnalyticsService()
