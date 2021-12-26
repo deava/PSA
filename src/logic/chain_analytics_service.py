@@ -50,7 +50,7 @@ class ChainAnalyticsService:
             transaction_hash: Hash value of the transaction in the Ethereum blockchain
         """
         transaction = self.caller.get_transaction_information(transaction_hash)
-        if transaction:
+        if transaction and transaction_hash not in self._hash_set:
             self._transaction_repository.add(transaction)
 
     def get_transactions_in_db(self):

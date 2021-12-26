@@ -21,12 +21,13 @@ class Caller:
 
     def get_transaction_information(self, transaction_hash):
         transaction_information = self.eth.get_proxy_transaction_by_hash(transaction_hash)
+        print(transaction_information)
         return Transaction(transaction_hash,
                            transaction_information["to"],
                            transaction_information["from"],
-                           transaction_information["value"],
-                           transaction_information["gas"],
-                           transaction_information["blockNumber"])
+                           int(transaction_information["value"],16),
+                           int(transaction_information["gas"],16),
+                           int(transaction_information["blockNumber"],16))
 
     def get_contract_creation_in_block(self, block_number):
         """
@@ -98,7 +99,6 @@ class Caller:
             starting_block = self.get_block_number()
 
         for i in range(0, count):
-            print(i)
             hex_block_number = hex(int(starting_block, 0)-i)
             contracts.extend(
                 self.get_contract_creation_in_block(hex_block_number))

@@ -20,16 +20,24 @@ class NewEventsView:
     def _intitialize(self):
         self._frame = ttk.Frame(master=self._root)
 
-        label = ttk.Label(master=self._frame, text="Hashed address:")
+        label = ttk.Label(master=self._frame, text="Input/Filter field:")
 
         self._wallet_id = ttk.Entry(master=self._frame)
 
         button_start = ttk.Button(
             master=self._frame,
-            text="Find transactions",
+            text="Find all transactions by address",
             command=lambda: self._transactions_handler(
                 str(self._wallet_id.get()))
         )
+
+        button_add_by_hash = ttk.Button(
+            master=self._frame,
+            text="Add transaction by transaction hash",
+            command=lambda: self._add_transaction_by_hash(
+                str(self._wallet_id.get()))
+        )
+
 
         button_database = ttk.Button(
             master=self._frame,
@@ -51,6 +59,7 @@ class NewEventsView:
 
         label.grid(row=1, column=0)
         button_start.grid(row=0, column=0)
+        button_add_by_hash.grid(row=0,column=1)
         button_database.grid(row=1, column=1)
         button_filter_by_to.grid(row=1, column=2)
         button_filter_by_from.grid(row=1, column=3)
@@ -86,11 +95,19 @@ class NewEventsView:
         for transaction in transactions_filtered:
             self._contract_list.insert('', 'end', values=(transaction.timestamp, transaction.transaction_hash,
                                        transaction.to_address, transaction.from_address, transaction.amount, transaction.gas_fee))
+    
+    def _add_transaction_by_hash(self,transaction_hash):
+        chain_analytics_service.add_transaction_to_db(transaction_hash)
+        self._get_all_transactions_db()
 
     def clipboard(self, event):
         tree = self._contract_list
         cur_item = tree.item(tree.focus())
         col = tree.identify_column(event.x)
+        if col == '#2':
+            self._frame.clipboard_clear()
+            print(cur_item)
+            self._frame.clipboard_append(cur_item["values"][1])
         if col == '#3':
             self._frame.clipboard_clear()
             print(cur_item)

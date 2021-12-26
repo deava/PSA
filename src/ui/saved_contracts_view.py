@@ -29,7 +29,7 @@ class ContractsView:
 
         button_find = ttk.Button(
             master=self._frame,
-            text="Find contracts created in the last 10 blocks",
+            text="Find contracts created in new block",
             command=lambda: self._contract_finder_by_block(
                 str(self._block_id.get()))
         )
