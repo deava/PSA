@@ -10,10 +10,8 @@ A unified platform for managing agency operations: projects, tasks, time trackin
 
 ```
 Browser
-  �
   +-- Next.js 15 Frontend  (port 3000)
       +-- React 19, TypeScript, Tailwind CSS 4, shadcn/ui
-  �
   +-- Express Backend      (port 4000)
         +-- REST API ? Supabase (PostgreSQL + RLS)
 ```
