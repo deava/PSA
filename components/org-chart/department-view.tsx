@@ -1,0 +1,413 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import {
+  Users,
+  Shield,
+  Building2,
+  UserPlus,
+  ChevronDown,
+  ChevronRight
+} from 'lucide-react';
+import { toast } from 'sonner';
+import { apiFetch } from '@/lib/api-config';
+
+// Type definitions (copied from organization-service to avoid import issues)
+interface DepartmentWithRoles {
+  id: string;
+  name: string;
+  description: string | null;
+  roles: Array<{
+    id: string;
+    name: string;
+    description: string | null;
+    department_id: string;
+    reporting_role_id: string | null;
+    hierarchy_level: number;
+    is_system_role: boolean;
+    user_count?: number;
+    users: Array<{
+      id: string;
+      name: string;
+      email: string;
+      image: string | null;
+    }>;
+  }>;
+  user_count: number;
+}
+
+type RoleCallback = (role: any) => void;
+
+interface DepartmentViewProps {
+  searchQuery?: string;
+  selectedDepartment?: string;
+  onRoleSelect?: RoleCallback;
+  onUserAssign?: (userId: string, roleId: string) => void;
+  onRoleUpdate?: (roleId: string) => void;
+  isReadOnly?: boolean;
+}
+
+interface DepartmentCardProps {
+  department: DepartmentWithRoles;
+  searchQuery?: string;
+  onRoleSelect?: RoleCallback;
+  onUserAssign?: (userId: string, roleId: string) => void;
+  onRoleUpdate?: (roleId: string) => void;
+  isReadOnly?: boolean;
+}
+
+function DepartmentCard({
+  department,
+  searchQuery = '',
+  onRoleSelect,
+  onUserAssign,
+  onRoleUpdate,
+  isReadOnly = false,
+}: DepartmentCardProps) {
+  const [expandedRoles, setExpandedRoles] = useState<Set<string>>(new Set());
+  const [roleUsers, setRoleUsers] = useState<Record<string, Record<string, unknown>[]>>({});
+
+  // Filter roles by search query
+  const filteredRoles = department.roles.filter((role: any) =>
+    !searchQuery || 
+    role.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    department.name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  const handleRoleToggle = (roleId: string) => {
+    const newExpanded = new Set(expandedRoles);
+    if (newExpanded.has(roleId)) {
+      newExpanded.delete(roleId);
+    } else {
+      newExpanded.add(roleId);
+    }
+    setExpandedRoles(newExpanded);
+  };
+
+  const loadRoleUsers = async (roleId: string) => {
+    if (roleUsers[roleId]) return;
+
+    try {
+      const response = await apiFetch(`/api/roles/${roleId}/users`);
+      if (!response.ok) throw new Error('Failed to load role users');
+      const users = await response.json();
+      
+      // Transform the response to match the expected format
+      const formattedUsers = users.map((user: any) => ({
+        user_id: (user as any).id,
+        user: {
+          id: (user as any).id,
+          name: (user as any).name,
+          email: (user as any).email,
+          image: (user as any).image
+        }
+      }));
+      
+      setRoleUsers(prev => ({ ...prev, [roleId]: formattedUsers }));
+    } catch (error: unknown) {
+      toast.error('Failed to load role users');
+      setRoleUsers(prev => ({ ...prev, [roleId]: [] }));
+    }
+  };
+
+  const handleRoleClick = (role: any) => {
+    onRoleSelect?.(role);
+  };
+
+  const handleUserAssign = (userId: string, roleId: string) => {
+    onUserAssign?.(userId, roleId);
+  };
+
+  const _handleRoleUpdate = (roleId: string) => {
+    onRoleUpdate?.(roleId);
+  };
+
+  const getRoleIcon = (role: any) => {
+    if (role.is_system_role as boolean) {
+      return <Shield className="h-4 w-4 text-red-500" />;
+    }
+    if ((role.hierarchy_level as number) >= 100) {
+      return <Users className="h-4 w-4 text-blue-500" />;
+    }
+    return <Users className="h-4 w-4 text-muted-foreground" />;
+  };
+
+  const getRoleColor = (role: any) => {
+    if (role.is_system_role as boolean) return 'border-red-200 bg-destructive/10';
+    if ((role.hierarchy_level as number) >= 100) return 'border-blue-200 bg-primary/10';
+    if ((role.hierarchy_level as number) >= 80) return 'border-green-200 bg-emerald-500/10';
+    return 'border-white/10 bg-card';
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Building2 className="h-5 w-5 text-blue-500" />
+          {department.name}
+        </CardTitle>
+        <CardDescription>{department.description}</CardDescription>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline">
+            <Users className="h-3 w-3 mr-1" />
+            {department.roles.reduce((sum, role) => sum + (role.user_count ?? 0), 0)} total users
+          </Badge>
+          <Badge variant="outline">
+            {department.roles.length} roles
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-3">
+          {filteredRoles.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-4">
+              {searchQuery ? 'No roles match your search' : 'No roles in this department'}
+            </p>
+          ) : (
+            filteredRoles.map((role:any) => (
+              <div key={role.id} className="space-y-2">
+                <div
+                  className={`flex items-center gap-2 p-3 rounded-lg border cursor-pointer transition-colors hover:bg-muted/50 ${getRoleColor(role)}`}
+                  onClick={() => { handleRoleClick(role); }}
+                >
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 w-6 p-0"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleRoleToggle(role.id);
+                      if (!expandedRoles.has(role.id)) {
+                        void loadRoleUsers(role.id);
+                      }
+                    }}
+                  >
+                    {expandedRoles.has(role.id) ? (
+                      <ChevronDown className="h-4 w-4" />
+                    ) : (
+                      <ChevronRight className="h-4 w-4" />
+                    )}
+                  </Button>
+
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    {getRoleIcon(role)}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-medium text-sm truncate">{role.name}</h4>
+                        {role.is_system_role && (
+                          <Badge variant="destructive" className="text-xs">
+                            System
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Level {role.hierarchy_level}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-xs">
+                      {role.user_count} users
+                    </Badge>
+                  </div>
+                </div>
+
+                {/* Users List */}
+                {expandedRoles.has(role.id) && (
+                  <div className="ml-8 space-y-2">
+                    {roleUsers[role.id] ? (
+                      roleUsers[role.id].length === 0 ? (
+                        <p className="text-sm text-muted-foreground text-center py-2">
+                          No users assigned to this role
+                        </p>
+                      ) : (
+                        <div className="space-y-2">
+                          {(roleUsers[role.id as string] as Array<Record<string, unknown>> || []).map((userRole: any) => {
+                            const user = userRole.user as Record<string, unknown> | undefined;
+                            return (
+                            <div
+                              key={userRole.user_id as string}
+                              className="flex items-center justify-between p-2 bg-muted/30 rounded border"
+                            >
+                              <div className="flex items-center gap-3">
+                                <Avatar className="h-8 w-8">
+                                  <AvatarImage src={((user as any)?.image as string | null) || undefined} />
+                                  <AvatarFallback>
+                                     {((user as any)?.name as string | undefined)?.split(' ').map((n: string) => n[0]).join('').toUpperCase()}
+                                  </AvatarFallback>
+                                </Avatar>
+                                <div>
+                                  <p className="text-sm font-medium">{String((user as any)?.name)}</p>
+                                  <p className="text-xs text-muted-foreground">{String((user as any)?.email)}</p>
+                                </div>
+                              </div>
+                              {!isReadOnly && onUserAssign && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-2 text-xs"
+                                  onClick={() => { handleUserAssign(userRole.user_id as string, role.id as string); }}
+                                >
+                                  <UserPlus className="h-3 w-3 mr-1" />
+                                  Reassign
+                                </Button>
+                              )}
+                            </div>
+                            );
+                          })}
+                        </div>
+                      )
+                    ) : (
+                      <div className="flex items-center justify-center py-2">
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function DepartmentView({
+  searchQuery = '',
+  selectedDepartment,
+  onRoleSelect,
+  onUserAssign,
+  onRoleUpdate,
+  isReadOnly = false,
+}: DepartmentViewProps) {
+  const [departments, setDepartments] = useState<DepartmentWithRoles[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    void loadDepartments();
+  }, []);
+
+  const loadDepartments = async () => {
+    try {
+      setLoading(true);
+      
+      // Fetch departments and roles from API
+      const [deptsResponse, rolesResponse] = await Promise.all([
+        apiFetch('/api/departments'),
+        apiFetch('/api/roles')
+      ]);
+      
+      if (!deptsResponse.ok || !rolesResponse.ok) {
+        throw new Error('Failed to load data');
+      }
+      
+      const departments = await deptsResponse.json();
+      const rolesResponseData = await rolesResponse.json();
+      
+      // Extract roles array from the API response
+      const roles = rolesResponseData.roles || rolesResponseData;
+      
+      // Group roles by department
+      const departmentsWithRoles = departments.map((dept: any) => ({
+        ...dept,
+        roles: roles.filter((role: any) => role.department_id === dept.id),
+        user_count: roles
+          .filter((role: any) => role.department_id === dept.id)
+          .reduce((sum: number, role: any) => sum + ((role.user_count as number) || 0), 0)
+      }));
+      
+      setDepartments(departmentsWithRoles);
+    } catch (error: unknown) {
+      // Backend unreachable — fail silently
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRoleSelect = (role: any) => {
+    onRoleSelect?.(role);
+  };
+
+  const handleUserAssign = (userId: string, roleId: string) => {
+    onUserAssign?.(userId, roleId);
+  };
+
+  const handleRoleUpdate = (roleId: string) => {
+    onRoleUpdate?.(roleId);
+  };
+
+  // Filter departments by selected department
+  // Treat 'all' or empty string as "show all departments"
+  const filteredDepartments = (selectedDepartment && selectedDepartment !== 'all')
+    ? departments.filter((dept: any) => dept.id === selectedDepartment)
+    : departments;
+  
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-96">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto"></div>
+          <p className="mt-2 text-sm text-muted-foreground">Loading departments...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold">Departments</h2>
+          <p className="text-muted-foreground">
+            View roles and users organized by department
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline">
+            {departments.length} departments
+          </Badge>
+          <Badge variant="outline">
+            {departments.reduce((sum, dept) => sum + dept.roles.length, 0)} total roles
+          </Badge>
+        </div>
+      </div>
+
+      {filteredDepartments.length === 0 ? (
+        <Card>
+          <CardContent className="py-8">
+            <div className="text-center">
+              <Building2 className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+              <h3 className="text-lg font-semibold mb-2">No Departments Found</h3>
+              <p className="text-muted-foreground">
+                {selectedDepartment 
+                  ? 'No departments match the selected filter'
+                  : 'No departments have been created yet'
+                }
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid gap-6">
+          {filteredDepartments.map((department:any) => (
+            <DepartmentCard
+              key={department.id}
+              department={department}
+              searchQuery={searchQuery}
+              onRoleSelect={handleRoleSelect}
+              onUserAssign={handleUserAssign}
+              onRoleUpdate={handleRoleUpdate}
+              isReadOnly={isReadOnly}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

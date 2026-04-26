@@ -1,0 +1,151 @@
+import { NextResponse, NextRequest } from 'next/server';
+import { createApiSupabaseClient, createAdminSupabaseClient } from '@/lib/supabase-server';
+import { requireAuthAndPermission, handleGuardError } from '@/lib/server-guards';
+import { Permission } from '@/lib/permissions';
+import { checkDemoModeForDestructiveAction } from '@/lib/api-demo-guard';
+import { logger } from '@/lib/debug-logger';
+import { isValidUUID } from '@/lib/validation-helpers';
+
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ roleId: string; userId: string }> }
+) {
+  try {
+    // Block in demo mode
+    const blocked = checkDemoModeForDestructiveAction('remove_user');
+    if (blocked) return blocked;
+
+    const { roleId, userId } = await params;
+
+    if (!isValidUUID(roleId) || !isValidUUID(userId)) {
+      return NextResponse.json({ error: 'Invalid ID format' }, { status: 400 });
+    }
+
+    // Check authentication and permission
+    const userProfile = await requireAuthAndPermission(Permission.MANAGE_USER_ROLES, {}, request);
+    
+    const supabase = createApiSupabaseClient(request);
+    const adminClient = createAdminSupabaseClient();
+    if (!supabase || !adminClient) {
+      return NextResponse.json({ error: 'Supabase not configured' }, { status: 500 });
+    }
+
+    // PRIVILEGE ESCALATION PROTECTION: Prevent users from removing their own roles
+    // (This is allowed but logged for audit purposes)
+    const isSelfRemoval = userId === userProfile.id;
+    if (isSelfRemoval) {
+      // Log self-removal attempt for audit
+      logger.warn('User attempted to remove their own role', {
+        userId: userProfile.id,
+        roleId,
+        timestamp: new Date().toISOString()
+      });
+      // Allow self-removal but ensure they have at least one other role
+    }
+
+    // Check if role exists
+    const { data: role, error: roleError } = await supabase
+      .from('roles')
+      .select('id, name')
+      .eq('id', roleId)
+      .single();
+
+    if (roleError || !role) {
+      return NextResponse.json({ error: 'Role not found' }, { status: 404 });
+    }
+
+    // Check if user exists
+    const { data: targetUser, error: userError } = await supabase
+      .from('user_profiles')
+      .select('id, name')
+      .eq('id', userId)
+      .single();
+
+    if (userError || !targetUser) {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+
+    // Check if assignment exists
+    const { data: existingAssignment } = await supabase
+      .from('user_roles')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('role_id', roleId)
+      .single();
+
+    if (!existingAssignment) {
+      return NextResponse.json({ error: 'User does not have this role' }, { status: 400 });
+    }
+
+    // Check if user has Record<string, unknown> other roles BEFORE attempting removal
+    const { data: otherRoles, error: otherRolesError } = await supabase
+      .from('user_roles')
+      .select('role_id, roles(name)')
+      .eq('user_id', userId)
+      .neq('role_id', roleId); // Exclude the role being removed
+
+    if (otherRolesError) {
+      logger.error('Error checking other roles', {}, otherRolesError as unknown as Error);
+      return NextResponse.json({ error: 'Failed to check other roles' }, { status: 500 });
+    }
+
+    // If user has no other roles, assign to "No Assigned Role" first
+    if (!otherRoles || otherRoles.length === 0) {
+      logger.debug('User has no other roles, assigning to "No Assigned Role" first');
+      
+      // Get the fallback role
+      const { data: fallbackRole, error: fallbackError } = await supabase
+        .from('roles')
+        .select('id, name')
+        .eq('name', 'No Assigned Role')
+        .single();
+
+      if (fallbackError || !fallbackRole) {
+        logger.error('Fallback role not found', {}, fallbackError as unknown as Error);
+        return NextResponse.json({ 
+          error: 'Fallback role not found. Cannot remove user from their last role.' 
+        }, { status: 500 });
+      }
+
+      // Assign user to fallback role first
+      const { error: assignError } = await adminClient
+        .from('user_roles')
+        .insert({
+          user_id: userId,
+          role_id: fallbackRole.id,
+          assigned_by: userProfile.id,
+          assigned_at: new Date().toISOString()
+        });
+
+      if (assignError) {
+        logger.error('Error assigning user to fallback role', {}, assignError as unknown as Error);
+        return NextResponse.json({ 
+          error: 'Failed to assign user to fallback role before removal' 
+        }, { status: 500 });
+      }
+
+      logger.debug('User assigned to fallback role before removal', { data: { userName: targetUser.name, fallbackRole: fallbackRole.name } });
+    } else {
+      logger.debug('User has other roles, proceeding with removal', { data: { userName: targetUser.name, otherRolesCount: otherRoles.length } });
+    }
+
+    // Now remove the assignment (user now has at least one other role or fallback role)
+    const { error: deleteError } = await adminClient
+      .from('user_roles')
+      .delete()
+      .eq('user_id', userId)
+      .eq('role_id', roleId);
+
+    if (deleteError) {
+      logger.error('Error removing user from role', {}, deleteError as unknown as Error);
+      return NextResponse.json({ error: 'Failed to remove user from role' }, { status: 500 });
+    }
+
+    logger.debug('User successfully removed from role', { data: { userName: targetUser.name, roleName: role.name } });
+
+    return NextResponse.json({ success: true });
+  } catch (error: unknown) {
+    return handleGuardError(error);
+  }
+}
+

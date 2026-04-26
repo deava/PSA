@@ -1,0 +1,789 @@
+"use strict";
+/**
+ * CLIENT PORTAL SERVICE
+ * Service layer for client portal operations (Phase 1 Feature 3)
+ * Handles client invitations, client project access, and client feedback
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.getClientFeedbackByAccount = exports.getClientInvitationsByAccount = void 0;
+exports.sendClientInvitation = sendClientInvitation;
+exports.getClientInvitationByToken = getClientInvitationByToken;
+exports.acceptClientInvitation = acceptClientInvitation;
+exports.cancelClientInvitation = cancelClientInvitation;
+exports.getAccountInvitations = getAccountInvitations;
+exports.getClientProjects = getClientProjects;
+exports.getClientProjectById = getClientProjectById;
+exports.submitClientFeedback = submitClientFeedback;
+exports.getProjectFeedback = getProjectFeedback;
+exports.getAccountFeedback = getAccountFeedback;
+exports.getAllClientFeedback = getAllClientFeedback;
+exports.getAccountFeedbackStats = getAccountFeedbackStats;
+exports.clientApproveProject = clientApproveProject;
+exports.clientRejectProject = clientRejectProject;
+const supabase_server_1 = require("./supabase-server");
+const debug_logger_1 = require("./debug-logger");
+const crypto_1 = require("crypto");
+// Helper to get supabase client with null check
+async function getSupabase() {
+    const supabase = (0, supabase_server_1.createAdminSupabaseClient)();
+    if (!supabase) {
+        throw new Error('Unable to connect to the database');
+    }
+    return supabase;
+}
+// =====================================================
+// CLIENT INVITATION MANAGEMENT
+// =====================================================
+/**
+ * Generate secure invitation token
+ */
+function generateInvitationToken() {
+    return (0, crypto_1.randomBytes)(32).toString('hex');
+}
+/**
+ * Send client invitation
+ */
+async function sendClientInvitation(params) {
+    const supabase = await getSupabase();
+    const { accountId, email, invitedBy, expiresInDays = 7 } = params;
+    // Check if user already exists
+    const { data: existingUser } = await supabase
+        .from('user_profiles')
+        .select('id, email, is_client')
+        .eq('email', email.toLowerCase())
+        .single();
+    if (existingUser) {
+        if (existingUser.is_client) {
+            throw new Error('User is already a client');
+        }
+        throw new Error('User already exists as an internal user and cannot be converted to a client');
+    }
+    // Check for existing pending invitation
+    const { data: existingInvitation } = await supabase
+        .from('client_portal_invitations')
+        .select('id, status')
+        .eq('account_id', accountId)
+        .eq('email', email.toLowerCase())
+        .eq('status', 'pending')
+        .single();
+    if (existingInvitation) {
+        throw new Error('A pending invitation already exists for this email');
+    }
+    // Generate token and expiration
+    const token = generateInvitationToken();
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + expiresInDays);
+    const { data, error } = await supabase
+        .from('client_portal_invitations')
+        .insert({
+        account_id: accountId,
+        email: email.toLowerCase(),
+        invited_by: invitedBy,
+        token,
+        expires_at: expiresAt.toISOString(),
+        status: 'pending',
+    })
+        .select()
+        .single();
+    if (error) {
+        debug_logger_1.logger.error('Error sending client invitation', { action: 'sendClientInvitation', accountId, email }, error);
+        throw error;
+    }
+    debug_logger_1.logger.info('Client invitation sent', {
+        invitationId: data.id,
+        accountId,
+        email,
+        invitedBy
+    });
+    return data;
+}
+/**
+ * Get client invitation by token
+ */
+async function getClientInvitationByToken(token) {
+    const supabase = await getSupabase();
+    const { data, error } = await supabase
+        .from('client_portal_invitations')
+        .select('*')
+        .eq('token', token)
+        .single();
+    if (error && error.code !== 'PGRST116') {
+        debug_logger_1.logger.error('Error fetching client invitation', { action: 'getClientInvitationByToken' }, error);
+        throw error;
+    }
+    return data || null;
+}
+/**
+ * Accept client invitation and create client user
+ */
+async function acceptClientInvitation(params) {
+    const supabase = await getSupabase();
+    const { token, userId, name, companyPosition } = params;
+    // Get invitation
+    const invitation = await getClientInvitationByToken(token);
+    if (!invitation) {
+        throw new Error('Invitation not found');
+    }
+    if (invitation.status !== 'pending') {
+        throw new Error('Invitation has already been used or cancelled');
+    }
+    if (new Date(invitation.expires_at) < new Date()) {
+        // Update status to expired
+        await supabase
+            .from('client_portal_invitations')
+            .update({ status: 'expired' })
+            .eq('id', invitation.id);
+        throw new Error('Invitation has expired');
+    }
+    // Update user profile to be a client
+    const { error: profileError } = await supabase
+        .from('user_profiles')
+        .update({
+        is_client: true,
+        client_account_id: invitation.account_id,
+        client_contact_name: name,
+        client_company_position: companyPosition || null,
+    })
+        .eq('id', userId);
+    if (profileError) {
+        debug_logger_1.logger.error('Error updating user profile to client', { action: 'acceptClientInvitation', userId }, profileError);
+        throw profileError;
+    }
+    // Get Client system role
+    const { data: clientRole } = await supabase
+        .from('roles')
+        .select('id')
+        .eq('is_system_role', true)
+        .ilike('name', 'client')
+        .single();
+    if (clientRole) {
+        // Assign user to Client role
+        const { error: roleError } = await supabase
+            .from('user_roles')
+            .insert({
+            user_id: userId,
+            role_id: clientRole.id,
+        });
+        if (roleError) {
+            debug_logger_1.logger.error('Error assigning Client role', { action: 'acceptClientInvitation', userId }, roleError);
+            // Don't throw - user is already marked as client
+        }
+    }
+    // Mark invitation as accepted
+    const { error: invitationError } = await supabase
+        .from('client_portal_invitations')
+        .update({
+        status: 'accepted',
+        accepted_at: new Date().toISOString(),
+    })
+        .eq('id', invitation.id);
+    if (invitationError) {
+        debug_logger_1.logger.error('Error updating invitation status', { action: 'acceptClientInvitation' }, invitationError);
+        // Don't throw - user is already set up as client
+    }
+    debug_logger_1.logger.info('Client invitation accepted', {
+        invitationId: invitation.id,
+        userId,
+        accountId: invitation.account_id
+    });
+}
+/**
+ * Cancel client invitation
+ */
+async function cancelClientInvitation(invitationId) {
+    const supabase = await getSupabase();
+    const { error } = await supabase
+        .from('client_portal_invitations')
+        .update({ status: 'cancelled' })
+        .eq('id', invitationId);
+    if (error) {
+        debug_logger_1.logger.error('Error cancelling client invitation', { action: 'cancelClientInvitation', invitationId }, error);
+        throw error;
+    }
+    debug_logger_1.logger.info('Client invitation cancelled', { invitationId });
+}
+/**
+ * Get invitations for an account
+ */
+async function getAccountInvitations(accountId) {
+    const supabase = await getSupabase();
+    const { data, error } = await supabase
+        .from('client_portal_invitations')
+        .select('*')
+        .eq('account_id', accountId)
+        .order('invited_at', { ascending: false });
+    if (error) {
+        debug_logger_1.logger.error('Error fetching account invitations', { action: 'getAccountInvitations', accountId }, error);
+        throw error;
+    }
+    return data || [];
+}
+// =====================================================
+// CLIENT PROJECT ACCESS
+// =====================================================
+/**
+ * Get projects for a client user
+ */
+async function getClientProjects(clientUserId) {
+    const supabase = await getSupabase();
+    // Get client's account
+    const { data: userProfile } = await supabase
+        .from('user_profiles')
+        .select('client_account_id')
+        .eq('id', clientUserId)
+        .single();
+    if (!userProfile?.client_account_id) {
+        throw new Error('User is not a client or has no associated account');
+    }
+    const { data: projects, error } = await supabase
+        .from('projects')
+        .select('id, name, description, status, priority, account_id, estimated_hours, start_date, end_date, created_at')
+        .eq('account_id', userProfile.client_account_id)
+        .order('created_at', { ascending: false });
+    if (error) {
+        debug_logger_1.logger.error('Error fetching client projects', { action: 'getClientProjects', clientUserId }, error);
+        throw error;
+    }
+    if (!projects || projects.length === 0) {
+        return [];
+    }
+    // Fetch workflow instances separately (workflow_instances has project_id FK)
+    const projectIds = projects.map((p) => p.id);
+    const { data: workflowInstances } = await supabase
+        .from('workflow_instances')
+        .select('id, project_id, current_node_id, status, workflow_templates(id, name)')
+        .in('project_id', projectIds)
+        .eq('status', 'active');
+    // Fetch current node details for all active workflow instances
+    const nodeIds = (workflowInstances || [])
+        .map((wi) => wi.current_node_id)
+        .filter(Boolean);
+    let nodeMap = {};
+    if (nodeIds.length > 0) {
+        const { data: nodes } = await supabase
+            .from('workflow_nodes')
+            .select('id, node_type, label')
+            .in('id', nodeIds);
+        if (nodes) {
+            nodeMap = Object.fromEntries(nodes.map((n) => [n.id, n]));
+        }
+    }
+    // Normalize workflow_templates from Supabase (may be array or object)
+    const normalizeWI = (wi) => ({
+        ...wi,
+        workflow_templates: Array.isArray(wi.workflow_templates)
+            ? wi.workflow_templates[0] || null
+            : wi.workflow_templates || null,
+        current_node: wi.current_node_id ? (nodeMap[wi.current_node_id] || null) : null,
+    });
+    // Merge workflow data into projects
+    return projects.map((p) => ({
+        ...p,
+        workflow_instance: workflowInstances?.find((wi) => wi.project_id === p.id)
+            ? normalizeWI(workflowInstances.find((wi) => wi.project_id === p.id))
+            : null,
+    }));
+}
+/**
+ * Get project details for client
+ */
+async function getClientProjectById(clientUserId, projectId) {
+    const supabase = await getSupabase();
+    // Verify client has access to this project
+    const { data: userProfile } = await supabase
+        .from('user_profiles')
+        .select('client_account_id')
+        .eq('id', clientUserId)
+        .single();
+    if (!userProfile?.client_account_id) {
+        throw new Error('User is not a client or has no associated account');
+    }
+    const { data: project, error } = await supabase
+        .from('projects')
+        .select('id, name, description, status, priority, account_id, estimated_hours, start_date, end_date, created_at')
+        .eq('id', projectId)
+        .eq('account_id', userProfile.client_account_id)
+        .single();
+    if (error && error.code !== 'PGRST116') {
+        debug_logger_1.logger.error('Error fetching client project', { action: 'getClientProjectById', clientUserId, projectId }, error);
+        throw error;
+    }
+    if (!project) {
+        return null;
+    }
+    // Fetch workflow instance separately (workflow_instances has project_id FK)
+    const { data: workflowInstances } = await supabase
+        .from('workflow_instances')
+        .select('id, project_id, current_node_id, status, workflow_templates(id, name)')
+        .eq('project_id', projectId)
+        .eq('status', 'active');
+    const wi = workflowInstances?.[0] || null;
+    // Fetch current node details if workflow instance exists
+    let currentNode = null;
+    if (wi?.current_node_id) {
+        const { data: node } = await supabase
+            .from('workflow_nodes')
+            .select('id, node_type, label')
+            .eq('id', wi.current_node_id)
+            .single();
+        currentNode = node || null;
+    }
+    return {
+        ...project,
+        workflow_instance: wi
+            ? {
+                ...wi,
+                workflow_templates: Array.isArray(wi.workflow_templates)
+                    ? wi.workflow_templates[0] || null
+                    : wi.workflow_templates || null,
+                current_node: currentNode,
+            }
+            : null,
+    };
+}
+// =====================================================
+// CLIENT FEEDBACK MANAGEMENT
+// =====================================================
+/**
+ * Submit client feedback
+ */
+async function submitClientFeedback(params) {
+    const supabase = await getSupabase();
+    const { projectId, clientUserId, satisfactionScore, whatWentWell, whatNeedsImprovement, performanceMetrics, workflowHistoryId } = params;
+    // Verify client has access to this project
+    const project = await getClientProjectById(clientUserId, projectId);
+    if (!project) {
+        throw new Error('Project not found or client does not have access');
+    }
+    // Validate satisfaction score
+    if (satisfactionScore !== undefined && (satisfactionScore < 1 || satisfactionScore > 10)) {
+        throw new Error('Satisfaction score must be between 1 and 10');
+    }
+    const { data, error } = await supabase
+        .from('client_feedback')
+        .insert({
+        project_id: projectId,
+        client_user_id: clientUserId,
+        satisfaction_score: satisfactionScore || null,
+        what_went_well: whatWentWell || null,
+        what_needs_improvement: whatNeedsImprovement || null,
+        performance_metrics: performanceMetrics || null,
+        workflow_history_id: workflowHistoryId || null,
+        visibility: 'private', // Always private
+    })
+        .select()
+        .single();
+    if (error) {
+        debug_logger_1.logger.error('Error submitting client feedback', { action: 'submitClientFeedback', projectId, clientUserId }, error);
+        throw error;
+    }
+    debug_logger_1.logger.info('Client feedback submitted', {
+        feedbackId: data.id,
+        projectId,
+        clientUserId,
+        satisfactionScore
+    });
+    return data;
+}
+/**
+ * Get feedback for a project
+ */
+async function getProjectFeedback(projectId) {
+    const supabase = await getSupabase();
+    const { data, error } = await supabase
+        .from('client_feedback')
+        .select('*')
+        .eq('project_id', projectId)
+        .order('submitted_at', { ascending: false });
+    if (error) {
+        debug_logger_1.logger.error('Error fetching project feedback', { action: 'getProjectFeedback', projectId }, error);
+        throw error;
+    }
+    return data || [];
+}
+/**
+ * Get feedback for an account
+ */
+async function getAccountFeedback(accountId) {
+    const supabase = await getSupabase();
+    const { data, error } = await supabase
+        .from('client_feedback')
+        .select(`
+      *,
+      projects!inner (
+        account_id
+      )
+    `)
+        .eq('projects.account_id', accountId)
+        .order('submitted_at', { ascending: false });
+    if (error) {
+        debug_logger_1.logger.error('Error fetching account feedback', { action: 'getAccountFeedback', accountId }, error);
+        throw error;
+    }
+    return data || [];
+}
+/**
+ * Get all client feedback (admin view)
+ */
+async function getAllClientFeedback() {
+    const supabase = await getSupabase();
+    const { data, error } = await supabase
+        .from('client_feedback')
+        .select('*')
+        .order('submitted_at', { ascending: false });
+    if (error) {
+        debug_logger_1.logger.error('Error fetching all client feedback', { action: 'getAllClientFeedback' }, error);
+        throw error;
+    }
+    return data || [];
+}
+/**
+ * Get feedback statistics for an account
+ */
+async function getAccountFeedbackStats(accountId) {
+    const supabase = await getSupabase();
+    const { data, error } = await supabase
+        .from('client_feedback')
+        .select(`
+      satisfaction_score,
+      projects!inner (
+        account_id
+      )
+    `)
+        .eq('projects.account_id', accountId)
+        .not('satisfaction_score', 'is', null);
+    if (error) {
+        debug_logger_1.logger.error('Error fetching account feedback stats', { action: 'getAccountFeedbackStats', accountId }, error);
+        throw error;
+    }
+    const feedback = data || [];
+    const totalFeedback = feedback.length;
+    if (totalFeedback === 0) {
+        return {
+            totalFeedback: 0,
+            averageSatisfaction: 0,
+            feedbackByScore: {},
+        };
+    }
+    const scores = feedback.map((f) => f.satisfaction_score);
+    const averageSatisfaction = scores.reduce((sum, score) => sum + score, 0) / totalFeedback;
+    const feedbackByScore = {};
+    for (const score of scores) {
+        feedbackByScore[score] = (feedbackByScore[score] || 0) + 1;
+    }
+    return {
+        totalFeedback,
+        averageSatisfaction: Math.round(averageSatisfaction * 10) / 10, // Round to 1 decimal
+        feedbackByScore,
+    };
+}
+// Export aliases for API route compatibility
+exports.getClientInvitationsByAccount = getAccountInvitations;
+exports.getClientFeedbackByAccount = getAccountFeedback;
+// =====================================================
+// CLIENT APPROVAL/REJECTION WORKFLOW
+// =====================================================
+/**
+ * Client approves project at workflow approval node
+ */
+async function clientApproveProject(params) {
+    const supabase = params.supabaseClient || await getSupabase();
+    const { projectId, workflowInstanceId, clientUserId, notes } = params;
+    // 1. Verify client has access to this project
+    const project = await getClientProjectById(clientUserId, projectId);
+    if (!project) {
+        throw new Error('Project not found or client does not have access');
+    }
+    // 2. Get workflow instance and verify it exists
+    const { data: instance, error: instanceError } = await supabase
+        .from('workflow_instances')
+        .select('*, current_node_id')
+        .eq('id', workflowInstanceId)
+        .eq('project_id', projectId)
+        .single();
+    if (instanceError || !instance) {
+        throw new Error('Workflow instance not found for this project');
+    }
+    if (instance.status !== 'active') {
+        throw new Error('Workflow is not active');
+    }
+    // 3. Verify current node is an approval node
+    const { data: currentNode, error: nodeError } = await supabase
+        .from('workflow_nodes')
+        .select('*')
+        .eq('id', instance.current_node_id)
+        .single();
+    if (nodeError || !currentNode) {
+        throw new Error('Current workflow node not found');
+    }
+    if (currentNode.node_type !== 'approval') {
+        throw new Error('Current workflow node is not an approval node. Cannot approve at this stage.');
+    }
+    // 4. Find the approval edge — look for a connection with decision=approved
+    const { data: connections, error: connectionsError } = await supabase
+        .from('workflow_connections')
+        .select('to_node_id, condition, workflow_nodes(*)')
+        .eq('from_node_id', instance.current_node_id)
+        .eq('workflow_template_id', currentNode.workflow_template_id);
+    if (connectionsError) {
+        debug_logger_1.logger.error('Error fetching next nodes', { action: 'clientApproveProject', workflowInstanceId }, connectionsError);
+        throw new Error('Failed to determine next workflow step');
+    }
+    if (!connections || connections.length === 0) {
+        // No next nodes - complete the workflow
+        await supabase
+            .from('workflow_instances')
+            .update({
+            status: 'completed',
+            completed_at: new Date().toISOString(),
+        })
+            .eq('id', workflowInstanceId);
+        debug_logger_1.logger.info('Client approved project - workflow completed', { projectId, workflowInstanceId, clientUserId });
+        await supabase.from('project_updates').insert({
+            project_id: projectId,
+            content: `✅ Client approved the project${notes ? `: "${notes}"` : ''}. Workflow completed successfully.`,
+            created_by: clientUserId,
+        });
+        return {
+            success: true,
+            message: 'Project approved successfully. Workflow is now complete.',
+        };
+    }
+    // 5. Find the specific approval edge (decision=approved), or fall back to first non-rejected edge
+    let nextNodeId;
+    const approvalEdge = connections.find((c) => {
+        const cond = typeof c.condition === 'string' ? JSON.parse(c.condition) : c.condition;
+        return cond?.decision === 'approved' || cond?.conditionValue === 'approved';
+    });
+    if (approvalEdge) {
+        nextNodeId = approvalEdge.to_node_id;
+    }
+    else if (connections.length === 1) {
+        nextNodeId = connections[0].to_node_id;
+    }
+    else {
+        // Multiple edges but no clear approval edge — take the non-rejected one
+        const nonRejected = connections.find((c) => {
+            const cond = typeof c.condition === 'string' ? JSON.parse(c.condition) : c.condition;
+            return !cond?.decision || (cond.decision !== 'rejected' && cond.conditionValue !== 'rejected');
+        });
+        nextNodeId = nonRejected ? nonRejected.to_node_id : connections[0].to_node_id;
+    }
+    // Check if next node is an end node — if so, complete the workflow
+    const nextNode = connections.find((c) => c.to_node_id === nextNodeId)?.workflow_nodes;
+    const isEndNode = nextNode && (Array.isArray(nextNode) ? nextNode[0]?.node_type : nextNode?.node_type) === 'end';
+    // Update workflow instance — move to next node (or complete if End node)
+    if (isEndNode) {
+        await supabase
+            .from('workflow_instances')
+            .update({
+            current_node_id: nextNodeId,
+            status: 'completed',
+            completed_at: new Date().toISOString(),
+        })
+            .eq('id', workflowInstanceId);
+    }
+    else {
+        const { error: updateError } = await supabase
+            .from('workflow_instances')
+            .update({ current_node_id: nextNodeId })
+            .eq('id', workflowInstanceId);
+        if (updateError) {
+            debug_logger_1.logger.error('Error updating workflow instance', { action: 'clientApproveProject', workflowInstanceId }, updateError);
+            throw new Error('Failed to advance workflow');
+        }
+    }
+    // Update workflow_active_steps: mark current as completed, next as active
+    await supabase
+        .from('workflow_active_steps')
+        .update({ status: 'completed', completed_at: new Date().toISOString() })
+        .eq('workflow_instance_id', workflowInstanceId)
+        .eq('node_id', instance.current_node_id);
+    if (!isEndNode) {
+        const { data: existingStep } = await supabase
+            .from('workflow_active_steps')
+            .select('id')
+            .eq('workflow_instance_id', workflowInstanceId)
+            .eq('node_id', nextNodeId)
+            .single();
+        if (existingStep) {
+            await supabase
+                .from('workflow_active_steps')
+                .update({ status: 'active', completed_at: null })
+                .eq('id', existingStep.id);
+        }
+        else {
+            await supabase
+                .from('workflow_active_steps')
+                .insert({
+                workflow_instance_id: workflowInstanceId,
+                node_id: nextNodeId,
+                branch_id: 'main',
+                status: 'active',
+            });
+        }
+    }
+    // Create workflow history entry
+    await supabase.from('workflow_history').insert({
+        workflow_instance_id: workflowInstanceId,
+        from_node_id: instance.current_node_id,
+        to_node_id: nextNodeId,
+        transitioned_by: clientUserId,
+        notes: `✅ Client approved${notes ? `: ${notes}` : ''}`,
+        transition_type: 'normal',
+    });
+    // Log approval in project updates
+    const statusMsg = isEndNode
+        ? `✅ Client approved the project${notes ? `: "${notes}"` : ''}. Workflow completed successfully.`
+        : `✅ Client approved the project${notes ? `: "${notes}"` : ''}. Moving to next workflow stage.`;
+    await supabase.from('project_updates').insert({
+        project_id: projectId,
+        content: statusMsg,
+        created_by: clientUserId,
+    });
+    debug_logger_1.logger.info('Client approved project', { projectId, workflowInstanceId, clientUserId, nextNodeId, isEndNode });
+    return {
+        success: true,
+        message: isEndNode
+            ? 'Project approved successfully. Workflow is now complete.'
+            : 'Project approved successfully. Workflow advanced to next stage.',
+    };
+}
+/**
+ * Client rejects project at workflow approval node
+ */
+async function clientRejectProject(params) {
+    const supabase = params.supabaseClient || await getSupabase();
+    const { projectId, workflowInstanceId, clientUserId, notes, issues = [] } = params;
+    // 1. Verify client has access to this project
+    const project = await getClientProjectById(clientUserId, projectId);
+    if (!project) {
+        throw new Error('Project not found or client does not have access');
+    }
+    // 2. Get workflow instance and verify it exists
+    const { data: instance, error: instanceError } = await supabase
+        .from('workflow_instances')
+        .select('*, current_node_id')
+        .eq('id', workflowInstanceId)
+        .eq('project_id', projectId)
+        .single();
+    if (instanceError || !instance) {
+        throw new Error('Workflow instance not found for this project');
+    }
+    if (instance.status !== 'active') {
+        throw new Error('Workflow is not active');
+    }
+    // 3. Verify current node is an approval node
+    const { data: currentNode, error: nodeError } = await supabase
+        .from('workflow_nodes')
+        .select('*')
+        .eq('id', instance.current_node_id)
+        .single();
+    if (nodeError || !currentNode) {
+        throw new Error('Current workflow node not found');
+    }
+    if (currentNode.node_type !== 'approval') {
+        throw new Error('Current workflow node is not an approval node. Cannot reject at this stage.');
+    }
+    // 4. Find the rejection edge — look for a connection from this node with decision=rejected
+    const { data: connections } = await supabase
+        .from('workflow_connections')
+        .select('to_node_id, condition')
+        .eq('from_node_id', instance.current_node_id)
+        .eq('workflow_template_id', currentNode.workflow_template_id);
+    let rejectionTargetNodeId = instance.current_node_id; // fallback: stay at current node
+    if (connections && connections.length > 0) {
+        const rejectionEdge = connections.find((c) => {
+            const cond = typeof c.condition === 'string' ? JSON.parse(c.condition) : c.condition;
+            return cond?.decision === 'rejected' || cond?.conditionValue === 'rejected';
+        });
+        if (rejectionEdge) {
+            rejectionTargetNodeId = rejectionEdge.to_node_id;
+        }
+    }
+    // 5. Update workflow instance and active steps to the rejection target node
+    if (rejectionTargetNodeId !== instance.current_node_id) {
+        await supabase
+            .from('workflow_instances')
+            .update({ current_node_id: rejectionTargetNodeId })
+            .eq('id', workflowInstanceId);
+        // Update workflow_active_steps: mark current as completed, target as active
+        await supabase
+            .from('workflow_active_steps')
+            .update({ status: 'completed', completed_at: new Date().toISOString() })
+            .eq('workflow_instance_id', workflowInstanceId)
+            .eq('node_id', instance.current_node_id);
+        // Check if target node has an active step entry, if not create one
+        const { data: existingStep } = await supabase
+            .from('workflow_active_steps')
+            .select('id')
+            .eq('workflow_instance_id', workflowInstanceId)
+            .eq('node_id', rejectionTargetNodeId)
+            .single();
+        if (existingStep) {
+            await supabase
+                .from('workflow_active_steps')
+                .update({ status: 'active', completed_at: null })
+                .eq('id', existingStep.id);
+        }
+        else {
+            await supabase
+                .from('workflow_active_steps')
+                .insert({
+                workflow_instance_id: workflowInstanceId,
+                node_id: rejectionTargetNodeId,
+                branch_id: 'main',
+                status: 'active',
+            });
+        }
+    }
+    // 6. Create workflow history entry for rejection
+    const { data: historyEntry } = await supabase
+        .from('workflow_history')
+        .insert({
+        workflow_instance_id: workflowInstanceId,
+        from_node_id: instance.current_node_id,
+        to_node_id: rejectionTargetNodeId,
+        transitioned_by: clientUserId,
+        notes: `❌ Client rejected: ${notes}`,
+        transition_type: 'normal',
+    })
+        .select()
+        .single();
+    // 5. Create project issues for each concern raised
+    if (issues.length > 0) {
+        const issueInserts = issues.map((issue) => ({
+            project_id: projectId,
+            content: issue,
+            status: 'open',
+            created_by: clientUserId,
+            workflow_history_id: historyEntry?.id || null,
+        }));
+        await supabase.from('project_issues').insert(issueInserts);
+    }
+    // Also create a general rejection issue with the notes
+    await supabase.from('project_issues').insert({
+        project_id: projectId,
+        content: notes,
+        status: 'open',
+        created_by: clientUserId,
+        workflow_history_id: historyEntry?.id || null,
+    });
+    // 6. Log rejection in project updates
+    const issuesText = issues.length > 0 ? ` Issues raised: ${issues.length}` : '';
+    await supabase.from('project_updates').insert({
+        project_id: projectId,
+        content: `❌ Client rejected the project: "${notes}"${issuesText}. Workflow paused for revisions.`,
+        created_by: clientUserId,
+    });
+    debug_logger_1.logger.info('Client rejected project', {
+        projectId,
+        workflowInstanceId,
+        clientUserId,
+        issueCount: issues.length + 1
+    });
+    return {
+        success: true,
+        message: `Project rejected. ${issues.length + 1} issue(s) created. The team has been notified and will address your concerns.`,
+    };
+}

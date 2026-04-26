@@ -1,6 +1,146 @@
-/laskarit/viikko2/unicafe
-.coverage
-.pytest_cache
-**/__pycache__
-htmlcov
-data/*
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# instructions folder
+/instructions/
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+#cursor
+*.cursor
+
+# Debug and testing files (not needed in production)
+*.backup
+*.bak
+*CHAT.md
+*chat.md
+# SQL files (EXCEPT migrations and seed data)
+*.sql
+!supabase/migrations/*.sql
+!supabase/seed.sql
+PERFORMANCE_REPORT.md
+README/local-debug/
+
+#Removing .env local files from the repo for security reasons.
+.env.local
+*.env
+
+# Supabase local development files
+supabase/.temp/
+supabase/.branches/
+supabase/.env
+
+# test scripts
+performance-test.js
+
+# local MCP configuration
+.mcp.json
+
+# Claude Code configuration (local only)
+.claude/
+.claude.json
+
+# Codacy CLI configuration and logs (local only)
+.codacy/
+
+# VS Code settings (local only)
+.vscode/
+
+# Test screenshots (large binary files - not needed in repo)
+docs/testing/*.png
+# Note: public/logo.svg is the app logo and should be tracked
+
+# Editor and IDE local files
+*.swp
+*.swo
+.idea/
+*.sublime-*
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+
+# Temporary files
+*.temp
+*.cache
+*.tmp
+*.auto
+
+# Backup files
+*.bak*
+*.backup*
+
+# Log files
+*.log
+
+# Development/debugging artifacts
+TESTING.md
+LINT_*.md
+*_STATUS.md
+*_WARNINGS.txt
+phase*.md
+
+# Script outputs
+scripts/*.output
+scripts/*.log
+
+# Temporary test data
+*.test.json
+test-results/
+
+# Playwright screenshots and reports
+.playwright-mcp/
+playwright-report/
+
+# Claude Code temp files
+tmpclaude-*
+
+# Bun lockfile (using npm for CI)
+bun.lock
+bun.lockb
+
+# Local documentation (keep main docs/)
+docs/phase*.md
+docs/*-status.md
+
+# Bug report data (local only)
+/data/
+
+# Electron build output
+/dist-electron/
+/dist-app/

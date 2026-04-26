@@ -1,0 +1,126 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { getUserFromRequest, createAdminSupabaseClient } from '@/lib/supabase-server';
+import { hasPermission } from '@/lib/rbac';
+import { Permission } from '@/lib/permissions';
+import { sendClientInvitation } from '@/lib/client-portal-service';
+import { validateRequestBody, sendClientInvitationSchema } from '@/lib/validation-schemas';
+import { hasAccountAccessServer } from '@/lib/access-control-server';
+import { logger } from '@/lib/debug-logger';
+import { isValidUUID } from '@/lib/validation-helpers';
+import { sendEmail } from '@/lib/email/mailer';
+import { clientInvitationEmailHtml, clientInvitationEmailText } from '@/lib/email/templates/client-invitation';
+
+// POST /api/accounts/[id]/invite-client - Send client portal invitation
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ accountId: string }> }
+) {
+  try {
+    const { accountId } = await params;
+
+    if (!isValidUUID(accountId)) {
+      return NextResponse.json({ error: 'Invalid ID format' }, { status: 400 });
+    }
+
+    const user = await getUserFromRequest(request);
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const admin = createAdminSupabaseClient();
+    if (!admin) return NextResponse.json({ error: 'Database connection failed' }, { status: 500 });
+
+    // Get user profile with roles
+    const { data: userProfile } = await admin
+      .from('user_profiles')
+      .select(`
+        *,
+        user_roles!user_id(
+          roles!role_id(
+            id,
+            name,
+            permissions,
+            department_id
+          )
+        )
+      `)
+      .eq('id', user.id)
+      .single();
+
+    if (!userProfile) {
+      return NextResponse.json({ error: 'User profile not found' }, { status: 404 });
+    }
+
+    // Check MANAGE_CLIENT_INVITES permission
+    const canInvite = await hasPermission(userProfile, Permission.MANAGE_CLIENT_INVITES, undefined, admin);
+    if (!canInvite) {
+      return NextResponse.json({ error: 'Insufficient permissions to send client invitations' }, { status: 403 });
+    }
+
+    // Verify user has access to this account
+    const hasAccess = await hasAccountAccessServer(supabase, user.id, accountId);
+    if (!hasAccess) {
+      return NextResponse.json({
+        error: 'You do not have access to this account'
+      }, { status: 403 });
+    }
+
+    // Validate request body
+    const body = await request.json();
+    const validation = validateRequestBody(sendClientInvitationSchema, body);
+    if (!validation.success) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
+    }
+
+    // Send invitation
+    const invitation = await sendClientInvitation({
+      accountId: accountId,
+      email: validation.data.email,
+      invitedBy: user.id,
+      expiresInDays: validation.data.expires_in_days
+    });
+
+    // Send invitation email
+    const inviteUrl = `${process.env.NEXT_PUBLIC_APP_URL}/client-invite/${invitation.token}`;
+
+    // Fetch account name for email
+    const { data: account } = await admin
+      .from('accounts')
+      .select('name')
+      .eq('id', accountId)
+      .single();
+
+    const emailResult = await sendEmail({
+      to: invitation.email,
+      subject: `You're invited to ${account?.name || 'a project'} on Worklo`,
+      html: clientInvitationEmailHtml({
+        accountName: account?.name || 'Your Account',
+        inviteUrl,
+        expiresInDays: 7,
+      }),
+      text: clientInvitationEmailText({
+        accountName: account?.name || 'Your Account',
+        inviteUrl,
+        expiresInDays: 7,
+      }),
+    });
+
+    if (!emailResult.success) {
+      logger.warn('Failed to send client invitation email', { email: invitation.email, error: emailResult.error });
+      // Don't fail the request — invitation is created, email can be resent
+    }
+
+    return NextResponse.json({ success: true, invitation }, { status: 201 });
+  } catch (error: unknown) {
+    const err = error as Error;
+    logger.error('Error in POST /api/accounts/[id]/invite-client', {}, err);
+
+    if (err.message?.includes('pending invitation already exists')) {
+      return NextResponse.json({ error: 'A pending invitation already exists for this email' }, { status: 409 });
+    }
+    if (err.message?.includes('internal user') || err.message?.includes('already exists')) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+
+    return NextResponse.json({ error: 'Failed to send invitation' }, { status: 500 });
+  }
+}

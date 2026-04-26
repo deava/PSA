@@ -1,0 +1,2699 @@
+"use strict";
+/**
+ * Workflow Execution Service
+ * Handles starting, progressing, and managing workflow instances
+ *
+ * IMPORTANT: All functions now accept a Supabase client as a parameter
+ * to maintain authentication context from API routes
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.startWorkflowForProject = startWorkflowForProject;
+exports.progressWorkflow = progressWorkflow;
+exports.getUserPendingApprovals = getUserPendingApprovals;
+exports.getUserActiveProjects = getUserActiveProjects;
+exports.getActiveSteps = getActiveSteps;
+exports.getAllActiveAndWaitingSteps = getAllActiveAndWaitingSteps;
+exports.isWorkflowComplete = isWorkflowComplete;
+exports.progressWorkflowStep = progressWorkflowStep;
+const debug_logger_1 = require("./debug-logger");
+// Type guard helpers
+function isString(value) {
+    return typeof value === 'string';
+}
+function isRecord(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+/**
+ * Capture a snapshot of the workflow template's nodes and connections
+ * Used to preserve the workflow state when a workflow completes
+ * Now also includes workflow history with user assignments per node
+ */
+async function captureWorkflowSnapshot(supabase, workflowTemplateId, workflowInstanceId) {
+    try {
+        // Get all nodes for this workflow template
+        const { data: nodes, error: nodesError } = await supabase
+            .from('workflow_nodes')
+            .select('*')
+            .eq('workflow_template_id', workflowTemplateId);
+        if (nodesError || !nodes) {
+            debug_logger_1.logger.error('Error capturing workflow nodes snapshot', { nodesError });
+            return null;
+        }
+        // Get all connections for this workflow template
+        const { data: connections, error: connectionsError } = await supabase
+            .from('workflow_connections')
+            .select('*')
+            .eq('workflow_template_id', workflowTemplateId);
+        if (connectionsError) {
+            debug_logger_1.logger.error('Error capturing workflow connections snapshot', { connectionsError });
+            return null;
+        }
+        // Get workflow history for this instance to capture user assignments
+        const { data: history, error: historyError } = await supabase
+            .from('workflow_history')
+            .select('*')
+            .eq('workflow_instance_id', workflowInstanceId)
+            .order('created_at', { ascending: true });
+        if (historyError) {
+            debug_logger_1.logger.error('Error capturing workflow history snapshot', { historyError });
+            // Continue without history - not a critical failure
+        }
+        // Build node assignments map from history
+        const nodeAssignments = {};
+        if (history && history.length > 0) {
+            // Get unique user IDs from history
+            const userIds = new Set();
+            history.forEach((h) => {
+                if (isString(h.transitioned_by))
+                    userIds.add(h.transitioned_by);
+            });
+            // Fetch user names
+            const { data: users } = await supabase
+                .from('user_profiles')
+                .select('id, name')
+                .in('id', Array.from(userIds));
+            const userMap = new Map((users || []).map((u) => [
+                isString(u.id) ? u.id : '',
+                isString(u.name) ? u.name : 'Unknown User'
+            ]));
+            // Map each node to the user who handled it (transitioned_by for the to_node_id)
+            history.forEach((h) => {
+                const toNodeId = h.to_node_id;
+                const transitionedBy = h.transitioned_by;
+                if (isString(toNodeId) && isString(transitionedBy)) {
+                    nodeAssignments[toNodeId] = {
+                        userId: transitionedBy,
+                        userName: userMap.get(transitionedBy) || 'Unknown User'
+                    };
+                }
+            });
+        }
+        return {
+            nodes,
+            connections: connections || [],
+            history: history || [],
+            nodeAssignments
+        };
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error capturing workflow snapshot', {}, error);
+        return null;
+    }
+}
+/**
+ * Start a new workflow instance for a project
+ */
+async function startWorkflowForProject(supabase, projectId, workflowTemplateId, startedBy) {
+    if (!supabase) {
+        return { success: false, error: 'Database connection failed' };
+    }
+    try {
+        // Validate workflowTemplateId
+        if (!workflowTemplateId || workflowTemplateId === '' || workflowTemplateId === 'undefined') {
+            debug_logger_1.logger.error('Invalid workflow template ID', { workflowTemplateId });
+            return { success: false, error: 'Invalid workflow template ID' };
+        }
+        // Check if workflow template exists and is active
+        const { data: template, error: templateError } = await supabase
+            .from('workflow_templates')
+            .select('id, name, is_active')
+            .eq('id', workflowTemplateId)
+            .single();
+        if (templateError || !template) {
+            debug_logger_1.logger.error('Workflow template not found', { workflowTemplateId });
+            return { success: false, error: 'Workflow template not found' };
+        }
+        if (!template.is_active) {
+            debug_logger_1.logger.error('Workflow template is not active', { workflowTemplateId });
+            return {
+                success: false,
+                error: `Workflow "${template.name}" is not active. Please activate it in the workflow editor before using.`
+            };
+        }
+        // Check if project already has an active workflow instance
+        const { data: existingInstance } = await supabase
+            .from('workflow_instances')
+            .select('id, status')
+            .eq('project_id', projectId)
+            .eq('status', 'active')
+            .limit(1);
+        if (existingInstance && existingInstance.length > 0) {
+            return {
+                success: false,
+                error: 'This project already has an active workflow. Complete or cancel the existing workflow before starting a new one.'
+            };
+        }
+        // Get workflow nodes and find the start node
+        const { data: nodes, error: nodesError } = await supabase
+            .from('workflow_nodes')
+            .select('*')
+            .eq('workflow_template_id', workflowTemplateId)
+            .order('position_y');
+        debug_logger_1.logger.debug('Workflow nodes query result', {
+            templateId: workflowTemplateId,
+            nodesCount: nodes?.length || 0,
+            error: nodesError?.message || null
+        });
+        if (nodesError) {
+            debug_logger_1.logger.error('Error loading workflow nodes', { nodesError });
+            return { success: false, error: `Failed to load workflow nodes: ${nodesError.message}` };
+        }
+        if (!nodes || nodes.length === 0) {
+            debug_logger_1.logger.error('No workflow nodes found for template', { workflowTemplateId });
+            return {
+                success: false,
+                error: `Workflow "${template.name}" has no nodes configured. Please add at least Start and End nodes in the workflow editor.`
+            };
+        }
+        // Find start node or first node
+        const startNode = nodes.find((n) => n.node_type === 'start') || nodes[0];
+        // Get connections to find next node after start
+        const { data: connections } = await supabase
+            .from('workflow_connections')
+            .select('*')
+            .eq('workflow_template_id', workflowTemplateId);
+        const nextNode = findNextNode(startNode.id, connections, nodes);
+        // Create workflow snapshot - this preserves the workflow state at the time the project starts
+        // Any future changes to the workflow template will NOT affect this project
+        const startedSnapshot = {
+            nodes: nodes,
+            connections: connections || [],
+            template_name: template.name,
+            captured_at: new Date().toISOString()
+        };
+        // Create workflow instance with snapshot
+        const { data: instance, error: instanceError } = await supabase
+            .from('workflow_instances')
+            .insert({
+            workflow_template_id: workflowTemplateId,
+            project_id: projectId,
+            current_node_id: nextNode?.id || startNode.id,
+            status: 'active',
+            started_snapshot: startedSnapshot, // Store snapshot for independent execution
+        })
+            .select()
+            .single();
+        if (instanceError || !instance) {
+            debug_logger_1.logger.error('Workflow instance creation error', { instanceError });
+            return {
+                success: false,
+                error: `Failed to create workflow instance: ${instanceError?.message || 'Unknown error'}`
+            };
+        }
+        // Update project with workflow instance
+        const { error: projectUpdateError } = await supabase
+            .from('projects')
+            .update({ workflow_instance_id: instance.id })
+            .eq('id', projectId);
+        if (projectUpdateError) {
+            debug_logger_1.logger.error('Failed to link workflow to project', { projectUpdateError });
+            // Don't fail the whole operation - workflow instance was created successfully
+            // The link can be established via workflow_instances.project_id
+        }
+        else {
+            debug_logger_1.logger.info('Successfully linked workflow instance to project', {
+                projectId,
+                workflowInstanceId: instance.id
+            });
+        }
+        // Create initial workflow history entry
+        await supabase.from('workflow_history').insert({
+            workflow_instance_id: instance.id,
+            from_node_id: startNode.id,
+            to_node_id: nextNode?.id || startNode.id,
+            handed_off_by: startedBy,
+            notes: 'Workflow started',
+            branch_id: 'main'
+        });
+        // Create initial active step for parallel workflow tracking
+        if (nextNode) {
+            await supabase.from('workflow_active_steps').insert({
+                workflow_instance_id: instance.id,
+                node_id: nextNode.id,
+                branch_id: 'main',
+                status: 'active',
+                assigned_user_id: null // Will be assigned based on node type
+            });
+        }
+        // Assign project to appropriate user based on node type
+        if (nextNode) {
+            await assignProjectToNode(supabase, projectId, nextNode, startedBy);
+        }
+        return { success: true, workflowInstanceId: instance.id };
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error starting workflow', {}, error);
+        return { success: false, error: 'Internal server error' };
+    }
+}
+/**
+ * Check if a user has a specific role
+ */
+async function userHasRole(supabase, userId, roleId) {
+    const { data: userRoles } = await supabase
+        .from('user_roles')
+        .select('role_id')
+        .eq('user_id', userId)
+        .eq('role_id', roleId);
+    return (userRoles?.length || 0) > 0;
+}
+/**
+ * Check if a user is assigned to a project via project_assignments
+ * NOTE: created_by and assigned_user_id on the project do NOT grant workflow progression rights
+ * Only explicit project_assignments (created by workflow progression) count
+ */
+async function isUserAssignedToProject(supabase, userId, projectId) {
+    // Only check project_assignments table - this is populated by workflow progression
+    const { data: assignments } = await supabase
+        .from('project_assignments')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('project_id', projectId)
+        .is('removed_at', null);
+    return (assignments?.length || 0) > 0;
+}
+/**
+ * Check if user is superadmin (bypasses role checks)
+ */
+async function isUserSuperadmin(supabase, userId) {
+    const { data: user } = await supabase
+        .from('user_profiles')
+        .select('is_superadmin')
+        .eq('id', userId)
+        .single();
+    if (user?.is_superadmin)
+        return true;
+    // Also check if user has a Superadmin role
+    const { data: superadminRole } = await supabase
+        .from('roles')
+        .select('id')
+        .ilike('name', 'superadmin')
+        .single();
+    if (superadminRole) {
+        return await userHasRole(supabase, userId, superadminRole.id);
+    }
+    return false;
+}
+/**
+ * Progress workflow to next step
+ */
+async function progressWorkflow(supabase, workflowInstanceId, currentUserId, decision, feedback, formResponseId, assignedUserId, inlineFormData) {
+    if (!supabase) {
+        return { success: false, error: 'Database connection failed' };
+    }
+    try {
+        // Get current workflow instance (including snapshot)
+        const { data: instance, error: instanceError } = await supabase
+            .from('workflow_instances')
+            .select('*, started_snapshot, workflow_templates(*)')
+            .eq('id', workflowInstanceId)
+            .single();
+        if (instanceError || !instance) {
+            return { success: false, error: 'Workflow instance not found' };
+        }
+        // Use snapshot data if available (for workflow independence from template changes)
+        // Fall back to querying live tables for backwards compatibility with older instances
+        let nodes;
+        let connections;
+        if (instance.started_snapshot?.nodes && instance.started_snapshot?.connections) {
+            // Use the snapshot - this ensures template changes don't affect in-progress workflows
+            nodes = instance.started_snapshot.nodes;
+            connections = instance.started_snapshot.connections;
+            debug_logger_1.logger.debug('[Workflow] Using snapshot data for instance', { workflowInstanceId });
+        }
+        else {
+            // Fallback for older instances without snapshot - query live tables
+            debug_logger_1.logger.debug('[Workflow] No snapshot found, querying live tables for instance', { workflowInstanceId });
+            const { data: liveNodes } = await supabase
+                .from('workflow_nodes')
+                .select('*')
+                .eq('workflow_template_id', instance.workflow_template_id);
+            const { data: liveConnections } = await supabase
+                .from('workflow_connections')
+                .select('*')
+                .eq('workflow_template_id', instance.workflow_template_id);
+            nodes = liveNodes || [];
+            connections = liveConnections || [];
+        }
+        const currentNode = nodes?.find((n) => n.id === instance.current_node_id);
+        if (!currentNode) {
+            return { success: false, error: 'Current node not found in workflow' };
+        }
+        // AUTHORIZATION: Check if user can progress this workflow step
+        // Superadmins bypass all checks
+        const isSuperadmin = await isUserSuperadmin(supabase, currentUserId);
+        if (!isSuperadmin) {
+            // 1. PROJECT ASSIGNMENT CHECK: User must be assigned to the project
+            if (instance.project_id) {
+                const isAssigned = await isUserAssignedToProject(supabase, currentUserId, instance.project_id);
+                if (!isAssigned) {
+                    return {
+                        success: false,
+                        error: 'You must be assigned to this project to advance the workflow'
+                    };
+                }
+            }
+            // 2. ENTITY VALIDATION: Check based on node type
+            const entityId = currentNode.entity_id;
+            const nodeType = currentNode.node_type;
+            if (isString(entityId)) {
+                if (nodeType === 'role' || nodeType === 'approval') {
+                    // For role and approval nodes, entity_id is a role_id
+                    const hasRequiredRole = await userHasRole(supabase, currentUserId, entityId);
+                    if (!hasRequiredRole) {
+                        // Get the role name for a better error message
+                        const { data: requiredRole } = await supabase
+                            .from('roles')
+                            .select('name')
+                            .eq('id', entityId)
+                            .single();
+                        const roleName = requiredRole?.name || 'the required role';
+                        return {
+                            success: false,
+                            error: `Only users with the "${roleName}" role can advance this workflow step`
+                        };
+                    }
+                }
+                else if (nodeType === 'department') {
+                    // For department nodes, entity_id is a department_id
+                    // Check if user has a role in this department
+                    const { data: userDeptRoles } = await supabase
+                        .from('user_roles')
+                        .select('roles!inner(department_id)')
+                        .eq('user_id', currentUserId)
+                        .eq('roles.department_id', entityId);
+                    if (!userDeptRoles || userDeptRoles.length === 0) {
+                        // Get department name for error message
+                        const { data: dept } = await supabase
+                            .from('departments')
+                            .select('name')
+                            .eq('id', entityId)
+                            .single();
+                        const deptName = dept?.name || 'the required department';
+                        return {
+                            success: false,
+                            error: `Only users in the "${deptName}" department can advance this workflow step`
+                        };
+                    }
+                }
+                // For form, conditional, start, end nodes - no entity validation needed
+            }
+        }
+        // Determine next node based on node type and decision
+        let nextNode;
+        const currentNodeId = isString(currentNode.id) ? currentNode.id : '';
+        if (currentNode.node_type === 'conditional') {
+            // Legacy support for existing workflows with conditional nodes
+            nextNode = findConditionalNextNode(currentNode, decision, connections, nodes);
+        }
+        else if (currentNode.node_type === 'approval' && decision) {
+            // Approval nodes can have multiple outgoing paths based on decision
+            nextNode = findDecisionBasedNextNode(currentNode, decision, connections, nodes);
+        }
+        else {
+            nextNode = findNextNode(currentNodeId, connections, nodes);
+        }
+        // If approval node, record the approval
+        if (currentNode.node_type === 'approval' && decision) {
+            await supabase.from('workflow_approvals').insert({
+                workflow_instance_id: workflowInstanceId,
+                node_id: currentNode.id,
+                approver_user_id: currentUserId,
+                decision,
+                feedback,
+            });
+        }
+        // Update workflow instance
+        let isComplete = !nextNode || nextNode.node_type === 'end';
+        await supabase
+            .from('workflow_instances')
+            .update({
+            current_node_id: nextNode?.id || null,
+            status: isComplete ? 'completed' : 'active',
+            completed_at: isComplete ? new Date().toISOString() : null,
+        })
+            .eq('id', workflowInstanceId);
+        // AUTO-ADVANCE: If we landed on a conditional node, immediately route through it
+        // This makes conditional nodes invisible to users - they just see the destination
+        if (nextNode?.node_type === 'conditional' && decision) {
+            const conditionalNode = nextNode; // Save reference to conditional node
+            const finalNode = findConditionalNextNode(conditionalNode, decision, connections, nodes);
+            if (finalNode) {
+                // Update to final destination, skipping the conditional
+                isComplete = finalNode.node_type === 'end';
+                await supabase
+                    .from('workflow_instances')
+                    .update({
+                    current_node_id: finalNode.id,
+                    status: isComplete ? 'completed' : 'active',
+                    completed_at: isComplete ? new Date().toISOString() : null,
+                })
+                    .eq('id', workflowInstanceId);
+                // Add history entry for conditional auto-advance
+                await supabase.from('workflow_history').insert({
+                    workflow_instance_id: workflowInstanceId,
+                    from_node_id: conditionalNode.id,
+                    to_node_id: finalNode.id,
+                    handed_off_by: currentUserId,
+                    notes: `Auto-routed based on decision: ${decision}`,
+                });
+                // Update nextNode for subsequent processing (assignments, completion)
+                nextNode = finalNode;
+            }
+        }
+        // Create workflow history entry
+        // If inline form data is provided (from workflow builder forms), store it in the notes field as JSON
+        const notesContent = inlineFormData
+            ? JSON.stringify({ type: 'inline_form', data: inlineFormData, decision, feedback })
+            : (decision ? JSON.stringify({ decision, feedback }) : null);
+        const { data: historyEntry } = await supabase.from('workflow_history').insert({
+            workflow_instance_id: workflowInstanceId,
+            from_node_id: currentNode.id,
+            to_node_id: nextNode?.id || null,
+            transitioned_by: currentUserId,
+            transition_type: 'normal',
+            form_response_id: formResponseId,
+            notes: notesContent,
+        }).select('id').single();
+        const workflowHistoryId = historyEntry?.id || null;
+        // AUTO-CREATE PROJECT ISSUE ON REJECTION
+        // When a workflow step is rejected, automatically create a project issue
+        // to track the rejection reason and ensure it's visible in the project's Issues tab
+        if (decision === 'rejected' && instance.project_id) {
+            const issueContent = `**Workflow Rejected**: ${currentNode.label}\n\n` +
+                `Workflow: ${instance.workflow_templates?.name || 'Unknown'}\n` +
+                `Reason: ${feedback || 'No reason provided'}`;
+            await supabase.from('project_issues').insert({
+                project_id: instance.project_id,
+                content: issueContent,
+                status: 'open',
+                created_by: currentUserId,
+                workflow_history_id: workflowHistoryId,
+            });
+        }
+        // AUTO-CREATE PROJECT UPDATE ON ALL PROGRESSIONS
+        // Document every workflow step transition in the project's Updates tab
+        // This provides a visible timeline of project progress
+        if (instance.project_id) {
+            let updateContent = '';
+            if (decision === 'approved') {
+                updateContent = `**Approved**: ${currentNode.label} → ${nextNode?.label || 'Complete'}` +
+                    (feedback ? `\nNotes: ${feedback}` : '');
+            }
+            else if (decision === 'rejected') {
+                updateContent = `**Rejected**: ${currentNode.label}\n` +
+                    `Reason: ${feedback || 'No reason provided'}`;
+            }
+            else {
+                updateContent = `**Progressed**: ${currentNode.label} → ${nextNode?.label || 'Complete'}`;
+            }
+            // NOTE: Form data is NOT included in project updates.
+            // It is stored in workflow_history.notes and displayed in the dedicated
+            // "Workflow Form Data" section on the project page.
+            await supabase.from('project_updates').insert({
+                project_id: instance.project_id,
+                content: updateContent,
+                created_by: currentUserId,
+                workflow_history_id: workflowHistoryId,
+            });
+        }
+        // Handle workflow completion or progression
+        if (isComplete && instance.project_id) {
+            // Workflow reached end - mark project as completed
+            await completeProject(supabase, instance.project_id);
+        }
+        else if (nextNode && instance.project_id) {
+            // Assign to next node's user (use assignedUserId if provided, otherwise assign to all users in role)
+            await assignProjectToNode(supabase, instance.project_id, nextNode, currentUserId, assignedUserId);
+        }
+        return { success: true, nextNode: nextNode || undefined };
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error progressing workflow', {}, error);
+        return { success: false, error: 'Internal server error' };
+    }
+}
+/**
+ * Find next node in workflow
+ */
+function findNextNode(currentNodeId, connections, nodes) {
+    if (!connections || !nodes)
+        return null;
+    const connection = connections.find((c) => c.from_node_id === currentNodeId);
+    if (!connection)
+        return null;
+    const toNodeId = connection.to_node_id;
+    return nodes.find((n) => n.id === toNodeId) || null;
+}
+/**
+ * Find next node for conditional routing (legacy support)
+ */
+function findConditionalNextNode(conditionalNode, decision, connections, nodes) {
+    const conditionalNodeId = isString(conditionalNode.id) ? conditionalNode.id : '';
+    if (!connections || !nodes || !decision) {
+        return findNextNode(conditionalNodeId, connections, nodes);
+    }
+    // Find connection that matches the decision
+    // Check both condition.decision AND condition.conditionValue for compatibility
+    // (database stores conditionValue, but some code may use decision)
+    const matchingConnection = connections.find((c) => {
+        if (c.from_node_id !== conditionalNodeId)
+            return false;
+        const condition = c.condition;
+        if (!isRecord(condition))
+            return false;
+        return condition.decision === decision || condition.conditionValue === decision;
+    });
+    if (!matchingConnection) {
+        // Fall back to default path
+        return findNextNode(conditionalNodeId, connections, nodes);
+    }
+    const toNodeId = matchingConnection.to_node_id;
+    return nodes.find((n) => n.id === toNodeId) || null;
+}
+/**
+ * Find next node for approval nodes with decision-based routing
+ * This is the new pattern where approval nodes directly have multiple outgoing edges
+ */
+function findDecisionBasedNextNode(approvalNode, decision, connections, nodes) {
+    if (!connections || !nodes) {
+        return null;
+    }
+    const approvalNodeId = isString(approvalNode.id) ? approvalNode.id : '';
+    // Find connection from this approval node with matching decision
+    // Check both condition.decision and condition.conditionValue for compatibility
+    const matchingConnection = connections.find((c) => {
+        if (c.from_node_id !== approvalNodeId)
+            return false;
+        const condition = c.condition;
+        if (!isRecord(condition))
+            return false;
+        return condition.decision === decision || condition.conditionValue === decision;
+    });
+    if (matchingConnection) {
+        const toNodeId = matchingConnection.to_node_id;
+        return nodes.find((n) => n.id === toNodeId) || null;
+    }
+    // Fall back to default path (connection without decision label)
+    const defaultConnection = connections.find((c) => {
+        if (c.from_node_id !== approvalNodeId)
+            return false;
+        const condition = c.condition;
+        if (!isRecord(condition))
+            return true; // No condition = default
+        return !condition.decision && !condition.conditionValue;
+    });
+    if (defaultConnection) {
+        const toNodeId = defaultConnection.to_node_id;
+        return nodes.find((n) => n.id === toNodeId) || null;
+    }
+    // If no matching or default path, just follow the first connection
+    return findNextNode(approvalNodeId, connections, nodes);
+}
+/**
+ * Evaluate a single form condition against submitted form data
+ * Returns true if the condition is satisfied
+ */
+function evaluateFormCondition(condition, formData) {
+    if (!condition.sourceFormFieldId || !condition.conditionType) {
+        return false;
+    }
+    const fieldValue = formData[condition.sourceFormFieldId];
+    const conditionValue = condition.value;
+    const conditionValue2 = condition.value2;
+    // Handle null/undefined field values
+    const fieldStr = fieldValue !== null && fieldValue !== undefined ? String(fieldValue) : '';
+    const conditionStr = conditionValue !== null && conditionValue !== undefined ? String(conditionValue) : '';
+    switch (condition.conditionType) {
+        // Text/String conditions
+        case 'equals':
+            return fieldStr.toLowerCase() === conditionStr.toLowerCase();
+        case 'contains':
+            return fieldStr.toLowerCase().includes(conditionStr.toLowerCase());
+        case 'starts_with':
+            return fieldStr.toLowerCase().startsWith(conditionStr.toLowerCase());
+        case 'ends_with':
+            return fieldStr.toLowerCase().endsWith(conditionStr.toLowerCase());
+        case 'is_empty':
+            return fieldValue === undefined || fieldValue === null || fieldValue === '' ||
+                (Array.isArray(fieldValue) && fieldValue.length === 0);
+        case 'is_not_empty':
+            return fieldValue !== undefined && fieldValue !== null && fieldValue !== '' &&
+                !(Array.isArray(fieldValue) && fieldValue.length === 0);
+        // Number conditions
+        case 'greater_than':
+            return Number(fieldValue) > Number(conditionValue);
+        case 'less_than':
+            return Number(fieldValue) < Number(conditionValue);
+        case 'greater_or_equal':
+            return Number(fieldValue) >= Number(conditionValue);
+        case 'less_or_equal':
+            return Number(fieldValue) <= Number(conditionValue);
+        case 'between':
+            const numVal = Number(fieldValue);
+            return numVal >= Number(conditionValue) && numVal <= Number(conditionValue2);
+        // Date conditions
+        case 'before':
+            return new Date(String(fieldValue)) < new Date(conditionValue);
+        case 'after':
+            return new Date(String(fieldValue)) > new Date(conditionValue);
+        // Checkbox conditions
+        case 'is_checked':
+            return fieldValue === true || fieldValue === 'true' || fieldValue === 'yes';
+        case 'is_not_checked':
+            return fieldValue === false || fieldValue === 'false' || fieldValue === 'no' || !fieldValue;
+        default:
+            debug_logger_1.logger.warn(`[evaluateFormCondition] Unknown condition type: ${condition.conditionType}`);
+            return false;
+    }
+}
+/**
+ * Find next node for conditional routing based on form data evaluation
+ * Evaluates conditions defined in the connection's condition object
+ */
+function findConditionalNextNodeWithFormData(conditionalNode, formData, connections, nodes) {
+    if (!connections || !nodes) {
+        return null;
+    }
+    // Get all outgoing connections from this conditional node
+    const outgoingConnections = connections.filter((c) => c.from_node_id === conditionalNode.id);
+    debug_logger_1.logger.debug('[findConditionalNextNodeWithFormData] Evaluating conditional routing', {
+        conditionalNodeId: conditionalNode.id,
+        conditionalNodeLabel: conditionalNode.label,
+        formDataKeys: Object.keys(formData),
+        formDataValues: formData,
+        outgoingConnectionCount: outgoingConnections.length,
+        connectionConditions: outgoingConnections.map((c) => {
+            const condition = c.condition;
+            return {
+                toNodeId: c.to_node_id,
+                hasCondition: !!condition,
+                conditionType: isRecord(condition) ? condition.conditionType : undefined,
+                sourceFormFieldId: isRecord(condition) ? condition.sourceFormFieldId : undefined,
+                value: isRecord(condition) ? condition.value : undefined
+            };
+        })
+    });
+    // Flatten formData for evaluation (convert nested structure to flat)
+    const flatFormData = {};
+    for (const [key, value] of Object.entries(formData)) {
+        if (isRecord(value)) {
+            // If value is a record, merge its contents
+            Object.assign(flatFormData, value);
+        }
+        else {
+            flatFormData[key] = value;
+        }
+    }
+    // Try each connection's condition
+    for (const connection of outgoingConnections) {
+        const condition = connection.condition;
+        // Skip if no condition defined
+        if (!isRecord(condition))
+            continue;
+        // Check if this is a form-based condition (has sourceFormFieldId)
+        const sourceFormFieldId = condition.sourceFormFieldId;
+        const conditionType = condition.conditionType;
+        const value = condition.value;
+        if (isString(sourceFormFieldId) && isString(conditionType)) {
+            const matches = evaluateFormCondition({ sourceFormFieldId, conditionType, value: isString(value) ? value : undefined }, flatFormData);
+            debug_logger_1.logger.debug('[findConditionalNextNodeWithFormData] Condition evaluation', {
+                fieldId: sourceFormFieldId,
+                conditionType,
+                expectedValue: value,
+                actualValue: flatFormData[sourceFormFieldId],
+                matches
+            });
+            if (matches) {
+                const targetNode = nodes.find((n) => n.id === connection.to_node_id);
+                debug_logger_1.logger.debug('[findConditionalNextNodeWithFormData] Found matching condition path', { label: targetNode?.label });
+                return targetNode || null;
+            }
+        }
+    }
+    // No form-based condition matched - look for default path
+    // Default path is a connection without form condition (no sourceFormFieldId)
+    const defaultConnection = outgoingConnections.find((c) => {
+        const condition = c.condition;
+        if (!isRecord(condition))
+            return true;
+        return !condition.sourceFormFieldId && !condition.decision && !condition.conditionValue;
+    });
+    if (defaultConnection) {
+        const defaultNode = nodes.find((n) => n.id === defaultConnection.to_node_id);
+        debug_logger_1.logger.debug('[findConditionalNextNodeWithFormData] Using default path', { label: defaultNode?.label });
+        return defaultNode || null;
+    }
+    // Last resort - use first connection
+    if (outgoingConnections.length > 0) {
+        const fallbackNode = nodes.find((n) => n.id === outgoingConnections[0].to_node_id);
+        debug_logger_1.logger.debug('[findConditionalNextNodeWithFormData] Using fallback (first connection)', { label: fallbackNode?.label });
+        return fallbackNode || null;
+    }
+    return null;
+}
+/**
+ * Assign project to user(s) based on workflow node
+ * Team members ACCUMULATE across workflow steps - they are not removed
+ * Each member tracks whether they were added manually or via workflow step
+ */
+async function assignProjectToNode(supabase, projectId, node, assignedBy, specificUserId) {
+    if (!supabase)
+        return;
+    try {
+        // Get project info for account access
+        const { data: project } = await supabase
+            .from('projects')
+            .select('account_id, created_by')
+            .eq('id', projectId)
+            .single();
+        // Get users for the role/entity
+        let userIds = [];
+        // If a specific user was assigned, use only that user
+        if (specificUserId) {
+            userIds = [specificUserId];
+        }
+        else if (node.entity_id) {
+            // Otherwise, get all users with this role
+            const { data: userRoles } = await supabase
+                .from('user_roles')
+                .select('user_id')
+                .eq('role_id', node.entity_id);
+            userIds = userRoles?.map((ur) => {
+                const usrId = ur.user_id;
+                return isString(usrId) ? usrId : '';
+            }).filter((id) => id !== '') || [];
+        }
+        // Get workflow node details for tracking
+        const nodeId = isString(node.id) ? node.id : null;
+        const nodeLabel = isString(node.label) ? node.label : null;
+        // Add each user (skip if they already have an active assignment)
+        for (const userId of userIds) {
+            // Check if user already has an ACTIVE assignment for this project
+            const { data: existingActiveArr } = await supabase
+                .from('project_assignments')
+                .select('id, source_type')
+                .eq('project_id', projectId)
+                .eq('user_id', userId)
+                .is('removed_at', null)
+                .limit(1);
+            if (existingActiveArr?.[0]) {
+                // User already has an active assignment - skip (don't overwrite their source)
+                debug_logger_1.logger.debug(`[assignProjectToNode] User ${userId} already assigned to project ${projectId}, skipping`);
+                continue;
+            }
+            // Check if user has an inactive (removed) assignment we can reactivate
+            const { data: existingInactiveArr } = await supabase
+                .from('project_assignments')
+                .select('id')
+                .eq('project_id', projectId)
+                .eq('user_id', userId)
+                .not('removed_at', 'is', null)
+                .limit(1);
+            if (existingInactiveArr?.[0]) {
+                // Reactivate existing assignment with workflow source
+                await supabase
+                    .from('project_assignments')
+                    .update({
+                    removed_at: null,
+                    role_in_project: nodeLabel || node.node_type,
+                    assigned_by: assignedBy,
+                    source_type: 'workflow',
+                    workflow_node_id: nodeId,
+                    workflow_node_label: nodeLabel
+                })
+                    .eq('id', existingInactiveArr[0].id);
+            }
+            else {
+                // Insert new assignment with workflow source
+                await supabase.from('project_assignments').insert({
+                    project_id: projectId,
+                    user_id: userId,
+                    role_in_project: nodeLabel || node.node_type,
+                    assigned_by: assignedBy,
+                    source_type: 'workflow',
+                    workflow_node_id: nodeId,
+                    workflow_node_label: nodeLabel
+                });
+            }
+        }
+        // Grant account access if needed
+        if (project && userIds.length > 0) {
+            const accountMembers = userIds.map((usrId) => ({
+                user_id: usrId,
+                account_id: project.account_id,
+            }));
+            // Insert account members (ignore duplicates)
+            await supabase
+                .from('account_members')
+                .upsert(accountMembers, { onConflict: 'user_id,account_id', ignoreDuplicates: true });
+        }
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error assigning project to node', {}, error);
+    }
+}
+/**
+ * Assign project to multiple parallel nodes at once
+ * This is used when a workflow forks into parallel branches with different user assignments
+ * Team members ACCUMULATE - they are not removed when new members are added
+ */
+async function assignProjectToParallelNodes(supabase, projectId, assignments, assignedBy) {
+    if (!supabase || assignments.length === 0)
+        return;
+    try {
+        // Get project info for account access
+        const { data: project } = await supabase
+            .from('projects')
+            .select('account_id, created_by')
+            .eq('id', projectId)
+            .single();
+        // Build a map of userId -> node info (for tracking which node added them)
+        const userNodeMap = new Map();
+        // For each assignment, collect user IDs with their source node
+        for (const assignment of assignments) {
+            const nodeId = isString(assignment.node.id) ? assignment.node.id : null;
+            const nodeLabel = isString(assignment.node.label) ? assignment.node.label : null;
+            if (assignment.userId) {
+                // Specific user assigned
+                userNodeMap.set(assignment.userId, { nodeId, nodeLabel });
+            }
+            else {
+                const entityId = assignment.node.entity_id;
+                if (isString(entityId)) {
+                    // Get all users with this role
+                    const { data: userRoles } = await supabase
+                        .from('user_roles')
+                        .select('user_id')
+                        .eq('role_id', entityId);
+                    userRoles?.forEach((ur) => {
+                        const usrId = ur.user_id;
+                        if (isString(usrId)) {
+                            userNodeMap.set(usrId, { nodeId, nodeLabel });
+                        }
+                    });
+                }
+            }
+        }
+        // Add each user (skip if they already have an active assignment)
+        for (const [userId, nodeInfo] of userNodeMap) {
+            // Check if user already has an ACTIVE assignment for this project
+            const { data: existingActiveArr2 } = await supabase
+                .from('project_assignments')
+                .select('id, source_type')
+                .eq('project_id', projectId)
+                .eq('user_id', userId)
+                .is('removed_at', null)
+                .limit(1);
+            if (existingActiveArr2?.[0]) {
+                // User already has an active assignment - skip
+                debug_logger_1.logger.debug(`[assignProjectToParallelNodes] User ${userId} already assigned to project ${projectId}, skipping`);
+                continue;
+            }
+            // Check if user has an inactive (removed) assignment we can reactivate
+            const { data: existingInactiveArr2 } = await supabase
+                .from('project_assignments')
+                .select('id')
+                .eq('project_id', projectId)
+                .eq('user_id', userId)
+                .not('removed_at', 'is', null)
+                .limit(1);
+            if (existingInactiveArr2?.[0]) {
+                // Reactivate existing assignment with workflow source
+                await supabase
+                    .from('project_assignments')
+                    .update({
+                    removed_at: null,
+                    role_in_project: nodeInfo.nodeLabel || 'workflow',
+                    assigned_by: assignedBy,
+                    source_type: 'workflow',
+                    workflow_node_id: nodeInfo.nodeId,
+                    workflow_node_label: nodeInfo.nodeLabel
+                })
+                    .eq('id', existingInactiveArr2[0].id);
+            }
+            else {
+                // Insert new assignment with workflow source
+                await supabase.from('project_assignments').insert({
+                    project_id: projectId,
+                    user_id: userId,
+                    role_in_project: nodeInfo.nodeLabel || 'workflow',
+                    assigned_by: assignedBy,
+                    source_type: 'workflow',
+                    workflow_node_id: nodeInfo.nodeId,
+                    workflow_node_label: nodeInfo.nodeLabel
+                });
+            }
+        }
+        // Grant account access if needed
+        if (project && userNodeMap.size > 0) {
+            const accountMembers = Array.from(userNodeMap.keys()).map((usrId) => ({
+                user_id: usrId,
+                account_id: project.account_id,
+            }));
+            // Insert account members (ignore duplicates)
+            await supabase
+                .from('account_members')
+                .upsert(accountMembers, { onConflict: 'user_id,account_id', ignoreDuplicates: true });
+        }
+        debug_logger_1.logger.info('Assigned project to parallel nodes', {
+            projectId,
+            userCount: userNodeMap.size,
+            nodeCount: assignments.length
+        });
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error assigning project to parallel nodes', {}, error);
+    }
+}
+/**
+ * Mark project as completed - removes from all active dashboards
+ */
+async function completeProject(supabase, projectId) {
+    if (!supabase)
+        return;
+    try {
+        // Update project status and completion timestamp
+        await supabase
+            .from('projects')
+            .update({
+            status: 'complete',
+            completed_at: new Date().toISOString()
+        })
+            .eq('id', projectId);
+        // NOTE: Do NOT remove project assignments on completion.
+        // Assignments are historical records showing who worked on the project.
+        // The project's status='complete' handles removing it from active views.
+        // Removing assignments erases the team roster and breaks completed project views.
+        // Auto-resolve all open issues for this project
+        // When a project is complete, any open issues are automatically resolved
+        const { data: resolvedIssues } = await supabase
+            .from('project_issues')
+            .update({
+            status: 'resolved',
+            resolved_at: new Date().toISOString()
+        })
+            .eq('project_id', projectId)
+            .eq('status', 'open')
+            .select('id');
+        const resolvedCount = resolvedIssues?.length || 0;
+        debug_logger_1.logger.info('Project completed', {
+            projectId,
+            resolvedIssuesCount: resolvedCount
+        });
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error completing project', {}, error);
+    }
+}
+/**
+ * Get user's pending workflow approvals
+ * Returns only approval nodes that the user can act on
+ *
+ * IMPORTANT: This now queries workflow_active_steps to support parallel workflows
+ * where multiple approval nodes can be active simultaneously
+ */
+async function getUserPendingApprovals(supabase, userId) {
+    if (!supabase)
+        return [];
+    try {
+        // Get user's roles
+        const { data: userRoles } = await supabase
+            .from('user_roles')
+            .select('role_id')
+            .eq('user_id', userId);
+        const roleIds = userRoles?.map((ur) => ur.role_id) || [];
+        // Note: Don't return early if roleIds is empty - user may still have direct assignments via assigned_user_id
+        // Query workflow_active_steps to get ALL active steps (supports parallel workflows)
+        // NOTE: We don't join workflow_nodes because the FK may not exist after template modifications
+        // We use snapshot data from workflow_instances.started_snapshot instead
+        // Use explicit FK names to avoid "multiple relationships" errors
+        const { data: activeSteps, error } = await supabase
+            .from('workflow_active_steps')
+            .select(`
+        id,
+        workflow_instance_id,
+        node_id,
+        status,
+        activated_at,
+        assigned_user_id,
+        workflow_instances:workflow_active_steps_workflow_instance_id_fkey!inner(
+          id,
+          status,
+          project_id,
+          workflow_template_id,
+          current_node_id,
+          started_snapshot,
+          projects:workflow_instances_project_id_fkey!inner(
+            id,
+            name,
+            description,
+            status,
+            priority,
+            account_id,
+            accounts(id, name)
+          )
+        )
+      `)
+            .eq('status', 'active');
+        if (error) {
+            debug_logger_1.logger.error('Error querying active workflow steps', { error });
+            return [];
+        }
+        // Pre-fetch workflow_node_assignments for this user
+        // This allows us to check if user is assigned to specific nodes in any workflow instance
+        const { data: nodeAssignments } = await supabase
+            .from('workflow_node_assignments')
+            .select('workflow_instance_id, node_id')
+            .eq('user_id', userId);
+        // Create a set of "instanceId:nodeId" keys for quick lookup
+        const assignedNodeKeys = new Set((nodeAssignments || []).map((na) => {
+            const instanceId = na.workflow_instance_id;
+            const nodeId = na.node_id;
+            return `${instanceId}:${nodeId}`;
+        }));
+        // Filter to only approval nodes where the user is assigned or has the required role
+        const filteredSteps = (activeSteps || []).filter((step) => {
+            const instance = step.workflow_instances;
+            if (!isRecord(instance))
+                return false;
+            // Only include active workflow instances
+            if (instance.status !== 'active')
+                return false;
+            // Get node data from snapshot (we don't join workflow_nodes because FK may not exist)
+            const startedSnapshot = instance.started_snapshot;
+            if (!isRecord(startedSnapshot))
+                return false;
+            const nodes = startedSnapshot.nodes;
+            if (!Array.isArray(nodes))
+                return false;
+            const node = nodes.find((n) => isRecord(n) && n.id === step.node_id);
+            if (!node) {
+                debug_logger_1.logger.warn('Could not find node data for active step', {
+                    stepId: step.id,
+                    nodeId: step.node_id,
+                    hasSnapshot: !!instance.started_snapshot
+                });
+                return false;
+            }
+            // Check if node is approval type
+            const nodeType = node.node_type;
+            if (!isString(nodeType) || nodeType !== 'approval')
+                return false;
+            // CHECK 1: User is specifically assigned to this step (e.g., sync leader, manual assignment)
+            if (step.assigned_user_id === userId) {
+                debug_logger_1.logger.debug('Pending approval matched via assigned_user_id', { stepId: step.id, nodeLabel: node.label });
+                return true;
+            }
+            // CHECK 2: User is assigned via workflow_node_assignments table
+            const nodeKey = `${step.workflow_instance_id}:${step.node_id}`;
+            if (assignedNodeKeys.has(nodeKey)) {
+                debug_logger_1.logger.debug('Pending approval matched via workflow_node_assignments', { stepId: step.id, nodeLabel: node.label });
+                return true;
+            }
+            // CHECK 3: User has the required role for this node
+            const entityId = node.entity_id;
+            if (isString(entityId) && roleIds.includes(entityId)) {
+                debug_logger_1.logger.debug('Pending approval matched via role', { stepId: step.id, nodeLabel: node.label, entityId });
+                return true;
+            }
+            // No match - user is not assigned and doesn't have the role
+            return false;
+        });
+        // Transform to match expected format (for backwards compatibility)
+        const result = filteredSteps.map((step) => {
+            // Get node data from snapshot (always use snapshot since we don't join workflow_nodes)
+            const instance = step.workflow_instances;
+            if (!isRecord(instance))
+                return { ...step, workflow_nodes: null };
+            const startedSnapshot = instance.started_snapshot;
+            if (!isRecord(startedSnapshot))
+                return { ...step, workflow_nodes: null };
+            const nodes = startedSnapshot.nodes;
+            if (!Array.isArray(nodes))
+                return { ...step, workflow_nodes: null };
+            const nodeData = nodes.find((n) => isRecord(n) && n.id === step.node_id);
+            return {
+                ...(isRecord(instance) ? instance : {}),
+                workflow_nodes: nodeData,
+                projects: isRecord(instance) ? instance.projects : undefined,
+                active_step_id: step.id,
+                current_node_id: step.node_id, // Override with this specific step's node
+                assigned_user_id: step.assigned_user_id // Include for debugging
+            };
+        });
+        debug_logger_1.logger.debug('Pending approvals query (parallel-aware)', {
+            userId,
+            roleIds,
+            totalActiveSteps: activeSteps?.length || 0,
+            nodeAssignmentCount: nodeAssignments?.length || 0,
+            filteredCount: result.length
+        });
+        return result;
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error fetching pending workflow tasks', {}, error);
+        return [];
+    }
+}
+/**
+ * Get user's active projects (where they're working, not approving)
+ * @param supabase - Authenticated Supabase client
+ * @param userId - User ID to get projects for
+ */
+async function getUserActiveProjects(supabase, userId) {
+    if (!supabase)
+        return [];
+    try {
+        const { data: projects } = await supabase
+            .from('project_assignments')
+            .select(`
+        *,
+        projects(*),
+        workflow_instances:projects(workflow_instance_id, workflow_instances(*))
+      `)
+            .eq('user_id', userId)
+            .is('removed_at', null);
+        // Filter out completed projects - they should only appear in "Finished Projects" section
+        const activeProjects = (projects || []).filter((p) => {
+            const projectData = p.projects;
+            if (!isRecord(projectData))
+                return false;
+            return projectData.status !== 'complete';
+        });
+        return activeProjects;
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error fetching active projects', {}, error);
+        return [];
+    }
+}
+// ==========================================
+// PARALLEL WORKFLOW EXECUTION SUPPORT
+// ==========================================
+/**
+ * Get all active steps for a workflow instance
+ */
+async function getActiveSteps(supabase, workflowInstanceId) {
+    if (!supabase)
+        return [];
+    const { data: steps, error } = await supabase
+        .from('workflow_active_steps')
+        .select('*')
+        .eq('workflow_instance_id', workflowInstanceId)
+        .eq('status', 'active')
+        .order('activated_at', { ascending: true });
+    if (error) {
+        debug_logger_1.logger.error('Error fetching active steps', { error });
+        return [];
+    }
+    return steps || [];
+}
+/**
+ * Get all active steps (including waiting) for a workflow instance
+ */
+async function getAllActiveAndWaitingSteps(supabase, workflowInstanceId) {
+    if (!supabase)
+        return [];
+    const { data: steps, error } = await supabase
+        .from('workflow_active_steps')
+        .select('*')
+        .eq('workflow_instance_id', workflowInstanceId)
+        .in('status', ['active', 'waiting'])
+        .order('activated_at', { ascending: true });
+    if (error) {
+        debug_logger_1.logger.error('Error fetching active/waiting steps', { error });
+        return [];
+    }
+    return steps || [];
+}
+/**
+ * Cancel all parallel sibling branches and waiting sync nodes
+ * Called when a parallel branch rejects and routes back past the fork point
+ * This ensures the workflow can cleanly restart from the rejection target (e.g., Form Node)
+ *
+ * Now includes flow ID tracking to:
+ * 1. Only cancel steps from the same parallel flow iteration
+ * 2. Also cancel orphaned steps that progressed past the sync (e.g., Videographer)
+ */
+async function cancelParallelSiblingsAndSyncNodes(supabase, workflowInstanceId, currentBranchId, currentStepId) {
+    if (!supabase || !currentBranchId) {
+        return { cancelledCount: 0 };
+    }
+    // Use the new helper functions for proper branch identification
+    const forkPointBranch = extractForkPointBranch(currentBranchId);
+    const currentFlowId = extractFlowId(currentBranchId);
+    // If we can't identify a fork point or this is already at the base level, nothing to cancel
+    if (forkPointBranch === currentBranchId) {
+        return { cancelledCount: 0 };
+    }
+    // Find all sibling active/waiting steps to cancel
+    // This includes: other parallel branches, waiting sync nodes, and orphaned post-sync steps
+    const { data: stepsToCancel, error: fetchError } = await supabase
+        .from('workflow_active_steps')
+        .select('id, branch_id, status, node_id')
+        .eq('workflow_instance_id', workflowInstanceId)
+        .in('status', ['active', 'waiting']);
+    if (fetchError || !stepsToCancel) {
+        debug_logger_1.logger.error('Error fetching steps to cancel', { fetchError });
+        return { cancelledCount: 0 };
+    }
+    // Filter to sibling branches (same fork point) and same flow iteration
+    // Also include orphaned steps that progressed past the sync
+    const siblingSteps = stepsToCancel.filter((step) => {
+        // Skip the current step (it will be marked completed normally)
+        if (currentStepId && step.id === currentStepId)
+            return false;
+        // Include ALL waiting steps from the same flow (at sync nodes)
+        if (step.status === 'waiting') {
+            // If we have a flow ID, only cancel same-flow waiting steps
+            if (currentFlowId) {
+                const branchId = step.branch_id;
+                const stepFlowId = isString(branchId) ? extractFlowId(branchId) : null;
+                return stepFlowId === currentFlowId;
+            }
+            // No flow ID - cancel all waiting steps (backwards compatibility)
+            return true;
+        }
+        // For active steps, check if they're siblings from the same flow
+        const branchId = step.branch_id;
+        if (isString(branchId)) {
+            const stepFlowId = extractFlowId(branchId);
+            const stepForkPoint = extractForkPointBranch(branchId);
+            // If we have flow IDs, only cancel same-flow steps
+            if (currentFlowId && stepFlowId && stepFlowId !== currentFlowId) {
+                return false;
+            }
+            // Include sibling parallel branches (same fork point)
+            if (stepForkPoint === forkPointBranch)
+                return true;
+            // Include steps on the fork point branch itself (orphaned post-sync steps)
+            // This catches cases where the sync released and created a step at Videographer
+            if (step.branch_id === forkPointBranch)
+                return true;
+        }
+        return false;
+    });
+    if (siblingSteps.length === 0) {
+        return { cancelledCount: 0 };
+    }
+    const stepIds = siblingSteps.map((s) => s.id);
+    // Cancel all sibling steps
+    const { error: updateError } = await supabase
+        .from('workflow_active_steps')
+        .update({
+        status: 'cancelled',
+        completed_at: new Date().toISOString()
+    })
+        .in('id', stepIds);
+    if (updateError) {
+        debug_logger_1.logger.error('Error cancelling sibling steps', { updateError });
+        return { cancelledCount: 0 };
+    }
+    debug_logger_1.logger.info('Cancelled parallel siblings and sync waiters', {
+        workflowInstanceId,
+        currentBranchId,
+        forkPointBranch,
+        currentFlowId,
+        cancelledSteps: siblingSteps.map((s) => ({ id: s.id, branch: s.branch_id, status: s.status }))
+    });
+    // Phase 2: Cancel any downstream orphaned steps
+    // These are steps that were created after the sync node completed
+    // but are now orphaned because we're going back before the sync
+    const cancelledNodeIds = siblingSteps.map((s) => s.node_id);
+    // Get workflow connections to find downstream nodes
+    const { data: instance } = await supabase
+        .from('workflow_instances')
+        .select('workflow_template_id')
+        .eq('id', workflowInstanceId)
+        .single();
+    if (instance?.workflow_template_id) {
+        const { data: connections } = await supabase
+            .from('workflow_connections')
+            .select('from_node_id, to_node_id')
+            .eq('workflow_template_id', instance.workflow_template_id);
+        if (connections && connections.length > 0) {
+            // Find all downstream node IDs from cancelled nodes
+            const downstreamNodeIds = new Set();
+            // Create local reference for closure to avoid TypeScript null check issues
+            const safeConnections = connections;
+            function findDownstream(nodeId, visited = new Set()) {
+                if (visited.has(nodeId))
+                    return;
+                visited.add(nodeId);
+                const outgoing = safeConnections.filter((c) => c.from_node_id === nodeId);
+                for (const conn of outgoing) {
+                    const toNodeId = conn.to_node_id;
+                    if (isString(toNodeId)) {
+                        downstreamNodeIds.add(toNodeId);
+                        findDownstream(toNodeId, visited);
+                    }
+                }
+            }
+            // Find downstream from each cancelled node
+            cancelledNodeIds.forEach((nodeId) => findDownstream(nodeId, new Set()));
+            if (downstreamNodeIds.size > 0) {
+                // Cancel any active/waiting steps at downstream nodes (same flow)
+                const { data: downstreamSteps } = await supabase
+                    .from('workflow_active_steps')
+                    .select('id, branch_id, node_id')
+                    .eq('workflow_instance_id', workflowInstanceId)
+                    .in('status', ['active', 'waiting'])
+                    .in('node_id', Array.from(downstreamNodeIds));
+                const orphanedDownstreamSteps = (downstreamSteps || []).filter((step) => {
+                    // Skip steps we already cancelled
+                    const stepId = step.id;
+                    if (isString(stepId) && stepIds.includes(stepId))
+                        return false;
+                    // If we have a flow ID, only cancel same-flow steps
+                    if (currentFlowId) {
+                        const branchId = step.branch_id;
+                        const stepFlowId = isString(branchId) ? extractFlowId(branchId) : null;
+                        return stepFlowId === currentFlowId || stepFlowId === null;
+                    }
+                    return true;
+                });
+                if (orphanedDownstreamSteps.length > 0) {
+                    const downstreamStepIds = orphanedDownstreamSteps.map((s) => s.id);
+                    await supabase
+                        .from('workflow_active_steps')
+                        .update({
+                        status: 'cancelled',
+                        completed_at: new Date().toISOString()
+                    })
+                        .in('id', downstreamStepIds);
+                    debug_logger_1.logger.info('Cancelled downstream orphaned steps', {
+                        count: downstreamStepIds.length,
+                        steps: orphanedDownstreamSteps.map((s) => ({ id: s.id, nodeId: s.node_id }))
+                    });
+                    return { cancelledCount: siblingSteps.length + downstreamStepIds.length };
+                }
+            }
+        }
+    }
+    return { cancelledCount: siblingSteps.length };
+}
+/**
+ * Find ALL next nodes from a given node (for fork detection)
+ * Returns array of nodes connected by outgoing edges
+ */
+function findNextNodes(currentNodeId, connections, nodes) {
+    if (!connections || !nodes)
+        return [];
+    const outgoingConnections = connections.filter((c) => c.from_node_id === currentNodeId);
+    return outgoingConnections
+        .map((c) => {
+        const toNodeId = c.to_node_id;
+        return nodes.find((n) => n.id === toNodeId);
+    })
+        .filter((n) => n !== undefined);
+}
+/**
+ * Check if a node is a fork point (multiple outgoing connections without decision conditions)
+ */
+function _isForkPoint(nodeId, connections) {
+    if (!connections)
+        return false;
+    // Get all outgoing connections
+    const outgoing = connections.filter((c) => c.from_node_id === nodeId);
+    // A fork point has multiple outgoing connections that are NOT decision-based
+    // Decision-based edges have condition.decision or condition.conditionValue set
+    const nonDecisionOutgoing = outgoing.filter((c) => {
+        const condition = c.condition;
+        if (!isRecord(condition))
+            return true;
+        return !condition.decision && !condition.conditionValue;
+    });
+    return nonDecisionOutgoing.length > 1;
+}
+/**
+ * Generate a flow ID for tracking parallel iterations
+ * Each time the workflow forks into parallel branches, a new flow ID is generated
+ * This allows us to distinguish between different "generations" of parallel execution
+ */
+function generateFlowId() {
+    return Date.now().toString(36);
+}
+/**
+ * Extract flow ID from a branch ID
+ * Handles both old format (main-0-timestamp) and new format (main-0_flowid)
+ */
+function extractFlowId(branchId) {
+    if (!branchId)
+        return null;
+    // New format: main-0_flowid -> extract flowid after underscore
+    const underscoreMatch = branchId.match(/_([a-z0-9]+)$/);
+    if (underscoreMatch)
+        return underscoreMatch[1];
+    // Old format: main-0-timestamp -> last segment might be timestamp
+    // Timestamps are 6+ alphanumeric characters that aren't purely numeric
+    const parts = branchId.split('-');
+    if (parts.length > 1) {
+        const lastPart = parts[parts.length - 1];
+        if (/^[a-z0-9]{6,}$/.test(lastPart) && !/^\d+$/.test(lastPart)) {
+            return lastPart;
+        }
+    }
+    return null;
+}
+/**
+ * Extract the fork point branch ID from a nested branch ID
+ * This handles both old format (main-0-timestamp) and new format (main-0_timestamp)
+ *
+ * Examples:
+ * - "main-0_abc123" -> "main"
+ * - "main-1-xyz789" -> "main" (old format)
+ * - "main-0_abc-1_def" -> "main" (nested forks)
+ * - "main" -> "main"
+ */
+function extractForkPointBranch(branchId) {
+    if (!branchId || branchId === 'main')
+        return 'main';
+    // Remove timestamp suffixes (after underscore) for new format
+    const cleaned = branchId.replace(/_[a-z0-9]+/g, '');
+    // Now extract the parent before the fork indices
+    const parts = cleaned.split('-');
+    // Keep removing trailing segments that are:
+    // 1. Purely numeric (branch indices like "0", "1")
+    // 2. Look like old-format timestamps (6+ alphanumeric)
+    while (parts.length > 1) {
+        const lastPart = parts[parts.length - 1];
+        // Remove if it's a number (branch index)
+        if (/^\d+$/.test(lastPart)) {
+            parts.pop();
+            continue;
+        }
+        // Remove if it looks like an old timestamp (6+ alphanumeric chars)
+        if (/^[a-z0-9]{6,}$/.test(lastPart)) {
+            parts.pop();
+            continue;
+        }
+        // Otherwise stop - this is part of the actual branch name
+        break;
+    }
+    return parts.join('-') || 'main';
+}
+/**
+ * Generate a unique branch ID for forked paths
+ * Uses underscore to separate the flow ID so hyphen-based parent extraction works correctly
+ *
+ * Format: {parentBranch}-{index}_{flowId}
+ * Example: main-0_abc123, main-1_abc123
+ */
+function generateBranchId(parentBranchId, index, flowId) {
+    const fid = flowId || generateFlowId();
+    return `${parentBranchId}-${index}_${fid}`;
+}
+/**
+ * Find the sync node downstream from a given node in a parallel branch
+ * Used to determine if rejection should route through sync instead of directly back
+ */
+function findDownstreamSyncNode(currentNodeId, connections, nodes) {
+    if (!connections || !nodes)
+        return null;
+    const visited = new Set();
+    const queue = [currentNodeId];
+    while (queue.length > 0) {
+        const nodeId = queue.shift();
+        if (visited.has(nodeId))
+            continue;
+        visited.add(nodeId);
+        // Find all outgoing connections from this node
+        const outgoing = connections.filter((c) => c.from_node_id === nodeId);
+        for (const conn of outgoing) {
+            const toNodeId = conn.to_node_id;
+            const targetNode = nodes.find((n) => n.id === toNodeId);
+            if (!targetNode)
+                continue;
+            // Found sync node!
+            if (targetNode.node_type === 'sync') {
+                return targetNode;
+            }
+            // Continue searching (don't go past end nodes)
+            const targetNodeId = targetNode.id;
+            if (targetNode.node_type !== 'end' && isString(targetNodeId)) {
+                queue.push(targetNodeId);
+            }
+        }
+    }
+    return null;
+}
+/**
+ * Check if a sync node has an 'any_rejected' outgoing edge
+ * This indicates the workflow is designed to handle rejections through sync aggregation
+ */
+function syncHasRejectionPath(syncNodeId, connections) {
+    if (!connections)
+        return false;
+    // Look for outgoing connections from sync with rejection conditions
+    const outgoingFromSync = connections.filter((c) => c.from_node_id === syncNodeId);
+    return outgoingFromSync.some((conn) => {
+        const condition = conn.condition;
+        if (!isRecord(condition))
+            return false;
+        // Check for any_rejected decision (sync aggregate decision)
+        return condition.decision === 'any_rejected' ||
+            condition.conditionValue === 'any_rejected';
+    });
+}
+/**
+ * Check if any sibling branches have progressed past their first step
+ * This helps determine if immediate cancellation would lose significant work
+ *
+ * Returns:
+ * - siblingsWithProgress: branches that have completed at least one step
+ * - siblingsAtStart: branches still at their first step (can be safely cancelled)
+ */
+async function checkSiblingProgress(supabase, workflowInstanceId, currentBranchId, currentActiveStepId) {
+    const _safeConnections = [];
+    // Extract flow ID from current branch
+    const flowId = extractFlowId(currentBranchId);
+    const forkPoint = extractForkPointBranch(currentBranchId);
+    // Find all active/waiting steps from the same fork (same parent branch, same flow ID)
+    const { data: siblingSteps } = await supabase
+        .from('workflow_active_steps')
+        .select('id, branch_id, node_id, status')
+        .eq('workflow_instance_id', workflowInstanceId)
+        .neq('id', currentActiveStepId || '')
+        .in('status', ['active', 'waiting']);
+    // Filter to only sibling branches (same parent, same flow ID)
+    const siblings = (siblingSteps || []).filter((step) => {
+        if (!step.branch_id)
+            return false;
+        const stepForkPoint = extractForkPointBranch(step.branch_id);
+        const stepFlowId = extractFlowId(step.branch_id);
+        return stepForkPoint === forkPoint && stepFlowId === flowId;
+    });
+    // Get completed steps count per branch
+    const { data: completedSteps } = await supabase
+        .from('workflow_active_steps')
+        .select('branch_id')
+        .eq('workflow_instance_id', workflowInstanceId)
+        .eq('status', 'completed');
+    // Count completed steps per sibling branch
+    const completedByBranch = {};
+    for (const step of completedSteps || []) {
+        if (!step.branch_id)
+            continue;
+        const stepForkPoint = extractForkPointBranch(step.branch_id);
+        const stepFlowId = extractFlowId(step.branch_id);
+        if (stepForkPoint === forkPoint && stepFlowId === flowId) {
+            completedByBranch[step.branch_id] = (completedByBranch[step.branch_id] || 0) + 1;
+        }
+    }
+    const siblingsWithProgress = [];
+    const siblingsAtStart = [];
+    const seenBranches = new Set();
+    for (const step of siblings) {
+        if (seenBranches.has(step.branch_id))
+            continue;
+        seenBranches.add(step.branch_id);
+        const completed = completedByBranch[step.branch_id] || 0;
+        if (completed > 0) {
+            siblingsWithProgress.push({ branchId: step.branch_id, completedSteps: completed });
+        }
+        else {
+            siblingsAtStart.push(step.branch_id);
+        }
+    }
+    return {
+        siblingsWithProgress,
+        siblingsAtStart,
+        totalSiblings: seenBranches.size
+    };
+}
+/**
+ * Check if all branches have reached completion (End nodes or waiting at Sync)
+ */
+async function isWorkflowComplete(supabase, workflowInstanceId) {
+    if (!supabase)
+        return false;
+    // Check if there are any active or waiting steps
+    const { data: activeSteps, error } = await supabase
+        .from('workflow_active_steps')
+        .select('id')
+        .eq('workflow_instance_id', workflowInstanceId)
+        .in('status', ['active', 'waiting']);
+    if (error) {
+        debug_logger_1.logger.error('Error checking workflow completion', { error });
+        return false;
+    }
+    // Workflow is complete if there are no active or waiting steps
+    return (activeSteps?.length || 0) === 0;
+}
+/**
+ * Get count of incoming connections to a sync node
+ */
+function getSyncNodeExpectedBranches(syncNodeId, connections) {
+    if (!connections)
+        return 0;
+    return connections.filter((c) => c.to_node_id === syncNodeId).length;
+}
+/**
+ * Handle arrival at a sync node
+ * Returns whether the sync should release (all branches arrived)
+ * Also aggregates approval decisions from parallel branches
+ *
+ * Now includes flow ID tracking to ensure only steps from the SAME parallel
+ * iteration are counted. This prevents issues where stale waiting steps
+ * from previous rejection cycles interfere with the current flow.
+ *
+ * Uses database locking to prevent race conditions when multiple branches
+ * complete simultaneously.
+ */
+async function handleSyncNode(supabase, workflowInstanceId, syncNodeId, completingBranchId, connections) {
+    // Try to acquire a lock for this sync operation
+    // This prevents race conditions when multiple branches complete simultaneously
+    const { data: lockAcquired } = await supabase
+        .rpc('acquire_sync_lock', {
+        p_workflow_instance_id: workflowInstanceId,
+        p_sync_node_id: syncNodeId,
+        p_locked_by: `branch-${completingBranchId}`
+    });
+    if (!lockAcquired) {
+        // Another process is handling this sync, return early
+        // The branch will still be marked as waiting in the main flow
+        debug_logger_1.logger.debug('Sync lock not acquired - another branch is handling sync', {
+            syncNodeId,
+            completingBranchId
+        });
+        return {
+            allArrived: false,
+            canProgress: false,
+            aggregateDecision: 'no_approvals',
+            branchDecisions: [],
+            lockAcquired: false
+        };
+    }
+    debug_logger_1.logger.debug('Sync lock acquired', { syncNodeId, completingBranchId });
+    // Get expected number of incoming branches
+    const expectedBranches = getSyncNodeExpectedBranches(syncNodeId, connections);
+    // Extract flow ID from the completing branch to filter same-generation steps
+    const currentFlowId = extractFlowId(completingBranchId);
+    // Get all steps waiting at this sync node
+    const { data: waitingSteps } = await supabase
+        .from('workflow_active_steps')
+        .select('*')
+        .eq('workflow_instance_id', workflowInstanceId)
+        .eq('node_id', syncNodeId)
+        .eq('status', 'waiting');
+    // Filter to only same-flow waiting steps if we have a flow ID
+    // This ensures we only count steps from the current parallel iteration,
+    // not stale steps from previous rejection cycles
+    const sameFlowWaiting = currentFlowId
+        ? (waitingSteps || []).filter((s) => {
+            const branchId = s.branch_id;
+            return isString(branchId) && extractFlowId(branchId) === currentFlowId;
+        })
+        : waitingSteps || [];
+    // Current branch will become waiting, so total waiting will be sameFlowWaiting + 1
+    const totalWaiting = sameFlowWaiting.length + 1;
+    const allArrived = totalWaiting >= expectedBranches;
+    // Aggregate approval decisions from parallel branches
+    // Find the node IDs that connect TO this sync node (the parallel branches)
+    const incomingNodeIds = connections
+        ? connections.filter((c) => c.to_node_id === syncNodeId).map((c) => c.from_node_id)
+        : [];
+    // Query workflow_approvals for decisions from these nodes in this workflow instance
+    let branchDecisions = [];
+    let aggregateDecision = 'no_approvals';
+    if (incomingNodeIds.length > 0 && allArrived) {
+        const { data: approvals } = await supabase
+            .from('workflow_approvals')
+            .select('node_id, decision, created_at')
+            .eq('workflow_instance_id', workflowInstanceId)
+            .in('node_id', incomingNodeIds)
+            .order('created_at', { ascending: false });
+        if (approvals && approvals.length > 0) {
+            // Get the most recent decision for each node (in case of re-approvals after rejection loops)
+            const latestDecisionByNode = new Map();
+            for (const approval of approvals) {
+                if (!latestDecisionByNode.has(approval.node_id)) {
+                    latestDecisionByNode.set(approval.node_id, approval.decision);
+                }
+            }
+            branchDecisions = Array.from(latestDecisionByNode.entries()).map(([nodeId, decision]) => ({
+                nodeId,
+                decision
+            }));
+            // Determine aggregate decision
+            const hasRejection = branchDecisions.some((d) => d.decision === 'rejected');
+            const allApproved = branchDecisions.length > 0 && branchDecisions.every((d) => d.decision === 'approved');
+            if (hasRejection) {
+                aggregateDecision = 'any_rejected';
+            }
+            else if (allApproved) {
+                aggregateDecision = 'all_approved';
+            }
+        }
+    }
+    debug_logger_1.logger.debug('Sync node check', {
+        syncNodeId,
+        expectedBranches,
+        currentFlowId,
+        sameFlowWaiting: sameFlowWaiting.length,
+        allWaiting: waitingSteps?.length || 0,
+        willBeWaiting: totalWaiting,
+        allArrived,
+        aggregateDecision,
+        branchDecisions,
+        lockAcquired: true
+    });
+    // If all branches arrived, we'll release the lock after sync completion in the caller
+    // If not all arrived, release the lock now so other branches can check
+    if (!allArrived) {
+        await supabase.rpc('release_sync_lock', {
+            p_workflow_instance_id: workflowInstanceId,
+            p_sync_node_id: syncNodeId
+        });
+    }
+    return { allArrived, canProgress: allArrived, aggregateDecision, branchDecisions, lockAcquired: true };
+}
+/**
+ * Progress a specific workflow step (for parallel workflow support)
+ * This is the main entry point for advancing parallel workflows
+ */
+async function progressWorkflowStep(supabase, workflowInstanceId, activeStepId, // Can be null for backward compatibility
+currentUserId, decision, feedback, formResponseId, assignedUserId, inlineFormData, assignedUsersPerNode // NEW: map of nodeId -> userId for parallel branches
+) {
+    if (!supabase) {
+        return { success: false, error: 'Database connection failed' };
+    }
+    try {
+        // Get workflow instance with snapshot
+        const { data: instance, error: instanceError } = await supabase
+            .from('workflow_instances')
+            .select('*, started_snapshot, workflow_templates(*)')
+            .eq('id', workflowInstanceId)
+            .single();
+        if (instanceError || !instance) {
+            return { success: false, error: 'Workflow instance not found' };
+        }
+        // Prevent progression of completed or cancelled workflows
+        if (instance.status !== 'active') {
+            return { success: false, error: `Cannot progress a ${instance.status} workflow` };
+        }
+        // Get nodes and connections - prefer snapshot over live tables
+        // This ensures deleted/modified templates don't break in-progress workflows
+        let nodes = [];
+        let connections = [];
+        if (instance.started_snapshot?.nodes && instance.started_snapshot?.connections) {
+            // Use snapshot data (protects against template deletion/modification)
+            nodes = instance.started_snapshot.nodes;
+            connections = instance.started_snapshot.connections;
+            debug_logger_1.logger.debug('[progressWorkflowStep] Using snapshot data');
+        }
+        else {
+            // Fallback to live tables for older instances without snapshot
+            debug_logger_1.logger.debug('[progressWorkflowStep] Falling back to live table queries');
+            const { data: liveNodes } = await supabase
+                .from('workflow_nodes')
+                .select('*')
+                .eq('workflow_template_id', instance.workflow_template_id);
+            const { data: liveConnections } = await supabase
+                .from('workflow_connections')
+                .select('*')
+                .eq('workflow_template_id', instance.workflow_template_id);
+            nodes = liveNodes || [];
+            connections = liveConnections || [];
+        }
+        // Determine current node based on whether we're using parallel or legacy mode
+        let currentNode = null;
+        let currentBranchId = 'main';
+        let activeStep = null;
+        if (activeStepId) {
+            // Parallel mode: Get specific active step
+            const { data: step } = await supabase
+                .from('workflow_active_steps')
+                .select('*')
+                .eq('id', activeStepId)
+                .single();
+            if (!step) {
+                return { success: false, error: 'Active step not found' };
+            }
+            activeStep = step;
+            currentBranchId = step.branch_id;
+            currentNode = nodes?.find((n) => n.id === step.node_id) || null;
+        }
+        else {
+            // Legacy mode: Use current_node_id
+            if (instance.current_node_id) {
+                currentNode = nodes?.find((n) => n.id === instance.current_node_id) || null;
+                // Also try to find the active step for this node (needed to mark it as completed)
+                const { data: legacyStep } = await supabase
+                    .from('workflow_active_steps')
+                    .select('*')
+                    .eq('workflow_instance_id', workflowInstanceId)
+                    .eq('node_id', instance.current_node_id)
+                    .eq('status', 'active')
+                    .single();
+                if (legacyStep) {
+                    activeStep = legacyStep;
+                    currentBranchId = legacyStep.branch_id || 'main';
+                }
+            }
+            else {
+                // Workflow hasn't started yet - current_node_id is null
+                // Find the start node and use it as the current node
+                currentNode = nodes?.find((n) => n.node_type === 'start') || null;
+            }
+        }
+        if (!currentNode) {
+            return { success: false, error: 'Current node not found' };
+        }
+        // AUTHORIZATION: Check if user can progress this workflow step
+        const isSuperadmin = await isUserSuperadmin(supabase, currentUserId);
+        if (!isSuperadmin) {
+            // 0. CHECK FOR EXPLICIT NODE ASSIGNMENT (bypasses entity check)
+            // This allows pre-assigned users to progress the workflow even without the required role
+            let hasNodeAssignment = false;
+            // Check if user is assigned to the active step (e.g., sync leader)
+            if (activeStep?.assigned_user_id === currentUserId) {
+                hasNodeAssignment = true;
+            }
+            // Also check workflow_node_assignments table
+            if (!hasNodeAssignment && currentNode) {
+                const { data: nodeAssignment } = await supabase
+                    .from('workflow_node_assignments')
+                    .select('id')
+                    .eq('workflow_instance_id', workflowInstanceId)
+                    .eq('node_id', currentNode.id)
+                    .eq('user_id', currentUserId)
+                    .single();
+                if (nodeAssignment) {
+                    hasNodeAssignment = true;
+                }
+            }
+            // CHECK: If node has NO assignments at all, allow any project member to progress
+            // This handles the "anyone on project if no one assigned" requirement
+            if (!hasNodeAssignment && currentNode) {
+                // Check if there are ANY assignments to this node
+                const { count } = await supabase
+                    .from('workflow_node_assignments')
+                    .select('id', { count: 'exact', head: true })
+                    .eq('workflow_instance_id', workflowInstanceId)
+                    .eq('node_id', currentNode.id);
+                const nodeHasNoAssignments = (count ?? 0) === 0;
+                // Also check if the active step has no specific assigned user
+                const stepHasNoAssignment = !activeStep?.assigned_user_id;
+                // If node has no assignments AND step has no assignment, treat as "anyone can progress"
+                if (nodeHasNoAssignments && stepHasNoAssignment) {
+                    debug_logger_1.logger.debug('Node has no assignments - allowing any project member to progress', {
+                        nodeId: currentNode.id,
+                        nodeLabel: currentNode.label,
+                        userId: currentUserId
+                    });
+                    hasNodeAssignment = true; // Allow this user to proceed
+                }
+            }
+            // 1. PROJECT ASSIGNMENT CHECK
+            if (instance.project_id) {
+                const isAssigned = await isUserAssignedToProject(supabase, currentUserId, instance.project_id);
+                if (!isAssigned) {
+                    return {
+                        success: false,
+                        error: 'You must be assigned to this project to advance the workflow'
+                    };
+                }
+            }
+            // 2. ENTITY VALIDATION (skip if user has explicit node assignment)
+            if (!hasNodeAssignment && currentNode.entity_id) {
+                if (currentNode.node_type === 'role' || currentNode.node_type === 'approval') {
+                    const hasRequiredRole = await userHasRole(supabase, currentUserId, currentNode.entity_id);
+                    if (!hasRequiredRole) {
+                        const { data: requiredRole } = await supabase
+                            .from('roles')
+                            .select('name')
+                            .eq('id', currentNode.entity_id)
+                            .single();
+                        const roleName = requiredRole?.name || 'the required role';
+                        return {
+                            success: false,
+                            error: `Only users with the "${roleName}" role can advance this workflow step`
+                        };
+                    }
+                }
+                else if (currentNode.node_type === 'department') {
+                    const { data: userDeptRoles } = await supabase
+                        .from('user_roles')
+                        .select('roles!inner(department_id)')
+                        .eq('user_id', currentUserId)
+                        .eq('roles.department_id', currentNode.entity_id);
+                    if (!userDeptRoles || userDeptRoles.length === 0) {
+                        const { data: dept } = await supabase
+                            .from('departments')
+                            .select('name')
+                            .eq('id', currentNode.entity_id)
+                            .single();
+                        const deptName = dept?.name || 'the required department';
+                        return {
+                            success: false,
+                            error: `Only users in the "${deptName}" department can advance this workflow step`
+                        };
+                    }
+                }
+            }
+        }
+        // Determine next nodes based on node type and decision
+        let nextNodes = [];
+        if (currentNode.node_type === 'conditional') {
+            // Legacy conditional node support
+            const nextNode = findConditionalNextNode(currentNode, decision, connections, nodes);
+            if (nextNode)
+                nextNodes = [nextNode];
+        }
+        else if (currentNode.node_type === 'approval' && decision) {
+            // Approval node with decision-based routing
+            const nextNode = findDecisionBasedNextNode(currentNode, decision, connections, nodes);
+            if (nextNode)
+                nextNodes = [nextNode];
+        }
+        else if (currentNode.node_type === 'sync') {
+            // Sync node - route based on aggregate decision from parallel branches
+            // The active step stores the aggregate_decision from handleSyncNode
+            const aggregateDecision = activeStep?.aggregate_decision;
+            debug_logger_1.logger.debug('Sync node routing', {
+                syncNodeId: currentNode.id,
+                aggregateDecision,
+                activeStepId: activeStep?.id
+            });
+            // Find outgoing connections from sync node
+            const outgoingFromSync = (connections || []).filter((c) => c.from_node_id === currentNode.id);
+            if (aggregateDecision === 'any_rejected') {
+                // Look for a rejection edge (condition contains 'rejected' or 'any_rejected')
+                const rejectionEdge = outgoingFromSync.find((c) => {
+                    const condition = c.condition;
+                    if (!isRecord(condition))
+                        return false;
+                    const condVal = condition.conditionValue || condition.decision;
+                    return condVal === 'rejected' || condVal === 'any_rejected';
+                });
+                if (rejectionEdge) {
+                    const targetNode = (nodes || []).find((n) => n.id === rejectionEdge.to_node_id);
+                    if (targetNode)
+                        nextNodes = [targetNode];
+                    debug_logger_1.logger.debug('Sync routing to rejection path', { label: targetNode?.label });
+                }
+                else {
+                    // No explicit rejection edge - use default edge if available
+                    const defaultEdge = outgoingFromSync.find((c) => !c.condition);
+                    if (defaultEdge) {
+                        const targetNode = (nodes || []).find((n) => n.id === defaultEdge.to_node_id);
+                        if (targetNode)
+                            nextNodes = [targetNode];
+                        debug_logger_1.logger.debug('Sync routing to default path (no rejection edge)', { label: targetNode?.label });
+                    }
+                }
+            }
+            else {
+                // all_approved or no_approvals - route to approved/default path
+                const approvedEdge = outgoingFromSync.find((c) => {
+                    const condition = c.condition;
+                    if (!isRecord(condition))
+                        return false;
+                    const condVal = condition.conditionValue || condition.decision;
+                    return condVal === 'approved' || condVal === 'all_approved';
+                });
+                if (approvedEdge) {
+                    const targetNode = (nodes || []).find((n) => n.id === approvedEdge.to_node_id);
+                    if (targetNode)
+                        nextNodes = [targetNode];
+                    debug_logger_1.logger.debug('Sync routing to approved path', { label: targetNode?.label });
+                }
+                else {
+                    // No explicit approved edge - use default edge
+                    const defaultEdge = outgoingFromSync.find((c) => !c.condition);
+                    if (defaultEdge) {
+                        const targetNode = (nodes || []).find((n) => n.id === defaultEdge.to_node_id);
+                        if (targetNode)
+                            nextNodes = [targetNode];
+                        debug_logger_1.logger.debug('Sync routing to default path', { label: targetNode?.label });
+                    }
+                }
+            }
+        }
+        else {
+            // Check if this is a fork point
+            nextNodes = findNextNodes(currentNode.id, connections, nodes);
+        }
+        // AUTO-ROUTE THROUGH CONDITIONAL NODES
+        // If the next node is a conditional and we have form data, auto-evaluate and route
+        // This allows forms to directly branch based on their responses without user interaction
+        if (nextNodes.length > 0) {
+            // Build accumulated form data from various sources
+            let accumulatedFormData = {};
+            // Add inline form data if provided (highest priority - most recent submission)
+            if (inlineFormData && Object.keys(inlineFormData).length > 0) {
+                // For inline forms, the actual responses are nested under 'responses' key
+                // Extract them to the top level for conditional evaluation
+                if (inlineFormData.responses && typeof inlineFormData.responses === 'object') {
+                    accumulatedFormData = { ...accumulatedFormData, ...inlineFormData.responses };
+                    debug_logger_1.logger.debug('[progressWorkflowStep] Extracted inline form responses for conditional routing', { keys: Object.keys(inlineFormData.responses) });
+                }
+                else {
+                    // Fallback: spread as-is (for non-nested form data)
+                    accumulatedFormData = { ...accumulatedFormData, ...inlineFormData };
+                }
+                debug_logger_1.logger.debug('[progressWorkflowStep] Using inline form data for conditional routing');
+            }
+            // If we have a form response ID, fetch that form's data
+            if (formResponseId) {
+                const { data: formResponse } = await supabase
+                    .from('form_responses')
+                    .select('response_data')
+                    .eq('id', formResponseId)
+                    .single();
+                if (formResponse?.response_data) {
+                    accumulatedFormData = { ...accumulatedFormData, ...formResponse.response_data };
+                    debug_logger_1.logger.debug('[progressWorkflowStep] Added form response data for conditional routing');
+                }
+            }
+            // If still no form data, try to get the most recent form response from workflow history
+            if (Object.keys(accumulatedFormData).length === 0) {
+                const { data: recentFormHistory } = await supabase
+                    .from('workflow_history')
+                    .select(`
+            form_response_id,
+            form_responses(response_data)
+          `)
+                    .eq('workflow_instance_id', workflowInstanceId)
+                    .not('form_response_id', 'is', null)
+                    .order('created_at', { ascending: false })
+                    .limit(1)
+                    .single();
+                // form_responses from join can be an array or object depending on the relationship
+                const formResponsesData = recentFormHistory?.form_responses;
+                const formResponseData = Array.isArray(formResponsesData)
+                    ? formResponsesData[0]?.response_data
+                    : formResponsesData?.response_data;
+                if (formResponseData && typeof formResponseData === 'object') {
+                    accumulatedFormData = { ...formResponseData };
+                    debug_logger_1.logger.debug('[progressWorkflowStep] Fetched recent form data from history for conditional routing');
+                }
+            }
+            // Now auto-route through any conditional nodes
+            for (let i = 0; i < nextNodes.length; i++) {
+                let nextNode = nextNodes[i];
+                let routingIterations = 0;
+                const maxIterations = 10; // Prevent infinite loops
+                while (nextNode && nextNode.node_type === 'conditional' && routingIterations < maxIterations) {
+                    routingIterations++;
+                    debug_logger_1.logger.debug(`[progressWorkflowStep] Auto-routing through conditional node: ${nextNode.label} (iteration ${routingIterations})`);
+                    // Try form-based routing first
+                    const conditionalNextNode = findConditionalNextNodeWithFormData(nextNode, accumulatedFormData, connections, nodes);
+                    if (conditionalNextNode) {
+                        // Log the routing for history
+                        debug_logger_1.logger.debug(`[progressWorkflowStep] Conditional routed to: ${conditionalNextNode.label}`);
+                        nextNode = conditionalNextNode;
+                    }
+                    else {
+                        // Fallback to legacy decision-based routing if no form match
+                        const legacyNext = findConditionalNextNode(nextNode, decision, connections, nodes);
+                        if (legacyNext) {
+                            nextNode = legacyNext;
+                        }
+                        else {
+                            // No route found - break the loop
+                            debug_logger_1.logger.warn(`[progressWorkflowStep] No route found from conditional node: ${nextNode.label}`);
+                            break;
+                        }
+                    }
+                }
+                // Update the next node in the array
+                nextNodes[i] = nextNode;
+            }
+        }
+        // CRITICAL: Validate rejection routing - prevent silent completion
+        // If rejection was requested but no rejection path exists, fail gracefully
+        if (decision === 'rejected' && nextNodes.length === 0) {
+            debug_logger_1.logger.error('Rejection routing failed - no rejection target found', {
+                workflowInstanceId,
+                currentNodeId: currentNode.id,
+                currentNodeLabel: currentNode.label,
+                nodeType: currentNode.node_type
+            });
+            return {
+                success: false,
+                error: `Rejection routing failed: No rejection path configured for "${currentNode.label}". Please add a rejection edge in the workflow editor.`
+            };
+        }
+        // Validate rejection doesn't create an immediate cycle (routing to self)
+        if (decision === 'rejected' && nextNodes.length > 0) {
+            const rejectionTarget = nextNodes[0];
+            if (rejectionTarget.id === currentNode.id) {
+                debug_logger_1.logger.error('Rejection routing creates immediate cycle', {
+                    workflowInstanceId,
+                    currentNodeId: currentNode.id,
+                    currentNodeLabel: currentNode.label,
+                    targetNodeId: rejectionTarget.id,
+                    targetNodeLabel: rejectionTarget.label
+                });
+                return {
+                    success: false,
+                    error: `Rejection routing failed: "${currentNode.label}" cannot reject to itself. Please configure a different rejection target.`
+                };
+            }
+            // Check for short cycles (rejection target leads directly back to current node)
+            const targetOutgoing = (connections || []).filter((c) => c.from_node_id === rejectionTarget.id);
+            const leadsBackToCurrent = targetOutgoing.some((c) => c.to_node_id === currentNode.id);
+            if (leadsBackToCurrent && rejectionTarget.node_type !== 'form') {
+                // Forms are allowed to lead back to approvals (that's the revision loop)
+                // But approval -> approval cycles without a form in between are problematic
+                debug_logger_1.logger.warn('Rejection routing may create a short cycle', {
+                    workflowInstanceId,
+                    currentNodeLabel: currentNode.label,
+                    targetNodeLabel: rejectionTarget.label,
+                    targetNodeType: rejectionTarget.node_type
+                });
+                // This is a warning, not a hard failure - some short cycles are intentional
+            }
+        }
+        // Record approval if applicable
+        if (currentNode.node_type === 'approval' && decision) {
+            await supabase.from('workflow_approvals').insert({
+                workflow_instance_id: workflowInstanceId,
+                node_id: currentNode.id,
+                approver_user_id: currentUserId,
+                decision,
+                feedback,
+            });
+        }
+        // Mark current active step as completed
+        if (activeStep) {
+            await supabase
+                .from('workflow_active_steps')
+                .update({
+                status: 'completed',
+                completed_at: new Date().toISOString()
+            })
+                .eq('id', activeStep.id);
+        }
+        // Handle parallel branch rejection - SMART LOGIC
+        // Decides whether to:
+        // 1. Route directly back and cancel siblings (old behavior - for simple parallel approvals)
+        // 2. Route to sync and let sync aggregate decisions (new behavior - preserves in-progress work)
+        let rejectionRoutingBack = false;
+        let rejectionRoutingToSync = false;
+        let targetBranchAfterRejection = currentBranchId;
+        if (decision === 'rejected' && currentBranchId && currentBranchId.includes('-')) {
+            // We're on a parallel branch (e.g., "main-0" or "main-1") and rejecting
+            const rejectionTarget = nextNodes[0];
+            // Check if rejection routes to a non-sync, non-end node (i.e., routing back)
+            // Form nodes and other node types before the fork point indicate we're going back
+            if (rejectionTarget &&
+                rejectionTarget.node_type !== 'sync' &&
+                rejectionTarget.node_type !== 'end') {
+                // SMART REJECTION: Check if we should route through sync instead
+                // This preserves work in progress on other branches
+                const downstreamSync = findDownstreamSyncNode(String(currentNode.id), connections, nodes);
+                const syncHasRejectionRoute = downstreamSync ? syncHasRejectionPath(downstreamSync.id, connections) : false;
+                const siblingProgress = await checkSiblingProgress(supabase, workflowInstanceId, currentBranchId, activeStep?.id);
+                const hasSiblingsWithWork = siblingProgress.siblingsWithProgress.length > 0;
+                debug_logger_1.logger.debug('Parallel rejection analysis', {
+                    downstreamSync: downstreamSync?.label || 'none',
+                    syncHasRejectionRoute,
+                    siblingsWithProgress: siblingProgress.siblingsWithProgress.length,
+                    siblingsAtStart: siblingProgress.siblingsAtStart.length
+                });
+                // DECISION: Route through sync if:
+                // 1. Sync has an 'any_rejected' path configured, OR
+                // 2. Any sibling has progressed past their first step (has work to preserve)
+                if (downstreamSync && (syncHasRejectionRoute || hasSiblingsWithWork)) {
+                    // Route to sync instead of directly back
+                    // This lets sync aggregate decisions and handle the rejection path
+                    rejectionRoutingToSync = true;
+                    // Replace the rejection target with the sync node
+                    nextNodes.length = 0;
+                    nextNodes.push(downstreamSync);
+                    debug_logger_1.logger.info('Smart rejection: Routing to sync node for aggregation');
+                    // Create project update explaining the routing
+                    if (instance.project_id) {
+                        const progressInfo = hasSiblingsWithWork
+                            ? ` (${siblingProgress.siblingsWithProgress.length} parallel branch(es) have work in progress)`
+                            : '';
+                        const updateContent = `**Workflow Decision**: "${currentNode.label}" rejected - routing to sync point for final decision.${progressInfo}`;
+                        await supabase.from('project_updates').insert({
+                            project_id: instance.project_id,
+                            content: updateContent,
+                            update_type: 'workflow',
+                        });
+                    }
+                }
+                else {
+                    // Original behavior: Cancel siblings and route directly back
+                    // This is used when:
+                    // - No sync node with rejection path exists, AND
+                    // - No siblings have progressed (no work to lose)
+                    rejectionRoutingBack = true;
+                    // Cancel all sibling branches and waiting sync nodes
+                    const { cancelledCount } = await cancelParallelSiblingsAndSyncNodes(supabase, workflowInstanceId, currentBranchId, activeStep?.id);
+                    debug_logger_1.logger.info('Traditional rejection: Cancelled sibling steps', { cancelledCount });
+                    // Extract the fork point branch using our helper function
+                    targetBranchAfterRejection = extractForkPointBranch(currentBranchId);
+                    // Create project update about the rejection resetting the parallel flow
+                    if (instance.project_id && cancelledCount > 0) {
+                        const updateContent = `**Workflow Reset**: "${currentNode.label}" rejected - returning to "${rejectionTarget.label}" for revision. All parallel approval branches have been reset.`;
+                        await supabase.from('project_updates').insert({
+                            project_id: instance.project_id,
+                            content: updateContent,
+                            update_type: 'workflow',
+                        });
+                    }
+                }
+            }
+        }
+        // Process each next node
+        const newActiveSteps = [];
+        // Not a new parallel fork if we're routing back OR routing a rejection to sync
+        const isParallel = nextNodes.length > 1 && !rejectionRoutingBack && !rejectionRoutingToSync;
+        // Generate a flow ID for this parallel iteration (if forking)
+        // This allows us to track and cancel steps from the same parallel "generation"
+        const flowId = isParallel ? generateFlowId() : null;
+        // Collect all user assignments for parallel branches
+        // We'll apply them all at once to avoid removing assignments between branches
+        const parallelAssignments = [];
+        for (let i = 0; i < nextNodes.length; i++) {
+            const nextNode = nextNodes[i];
+            // When rejection routes back past fork, use the parent branch (e.g., 'main')
+            // When rejection routes to sync, keep the current branch ID for proper tracking
+            // Otherwise use normal branching logic
+            const baseBranchId = rejectionRoutingBack ? targetBranchAfterRejection : currentBranchId;
+            // Pass the flow ID to generateBranchId for proper tracking
+            const newBranchId = isParallel ? generateBranchId(baseBranchId, i, flowId) : baseBranchId;
+            // Handle sync nodes
+            if (nextNode.node_type === 'sync') {
+                const syncResult = await handleSyncNode(supabase, workflowInstanceId, nextNode.id, newBranchId, connections);
+                // If lock was not acquired, another branch is handling the sync
+                // Just create a waiting step and continue
+                if (!syncResult.lockAcquired) {
+                    const { data: waitingStep } = await supabase
+                        .from('workflow_active_steps')
+                        .insert({
+                        workflow_instance_id: workflowInstanceId,
+                        node_id: nextNode.id,
+                        branch_id: newBranchId,
+                        status: 'waiting',
+                        assigned_user_id: null
+                    })
+                        .select()
+                        .single();
+                    if (waitingStep)
+                        newActiveSteps.push(waitingStep);
+                    continue;
+                }
+                if (syncResult.allArrived) {
+                    // All branches arrived - determine sync leader
+                    // The sync leader is the user with the highest role hierarchy level
+                    // They will be responsible for ASSIGNING someone to the next step
+                    // The sync node becomes an ACTIVE task for them
+                    // Get all waiting steps at this sync to find the users who completed them
+                    const { data: waitingStepsAtSync } = await supabase
+                        .from('workflow_active_steps')
+                        .select('assigned_user_id')
+                        .eq('workflow_instance_id', workflowInstanceId)
+                        .eq('node_id', nextNode.id)
+                        .eq('status', 'waiting');
+                    // Collect unique user IDs (including current user completing the last branch)
+                    const syncUserIds = new Set();
+                    if (assignedUserId)
+                        syncUserIds.add(assignedUserId);
+                    if (currentUserId)
+                        syncUserIds.add(currentUserId); // The user triggering this completion
+                    (waitingStepsAtSync || []).forEach((s) => {
+                        if (s.assigned_user_id)
+                            syncUserIds.add(s.assigned_user_id);
+                    });
+                    // Find the sync leader (highest role hierarchy_level)
+                    let syncLeaderId = null;
+                    if (syncUserIds.size > 0) {
+                        const userIdsArray = Array.from(syncUserIds);
+                        // Get users' roles with hierarchy levels
+                        const { data: userRolesData } = await supabase
+                            .from('user_roles')
+                            .select(`
+                user_id,
+                roles:role_id (
+                  id,
+                  hierarchy_level
+                )
+              `)
+                            .in('user_id', userIdsArray);
+                        // Find max hierarchy level per user
+                        const userMaxLevels = [];
+                        for (const uid of userIdsArray) {
+                            const userRoles = (userRolesData || []).filter((ur) => ur.user_id === uid);
+                            const maxLevel = userRoles.reduce((max, ur) => {
+                                const level = ur.roles?.hierarchy_level ?? 0;
+                                return level > max ? level : max;
+                            }, 0);
+                            userMaxLevels.push({ userId: uid, maxLevel });
+                        }
+                        // Sort by hierarchy level descending
+                        userMaxLevels.sort((a, b) => b.maxLevel - a.maxLevel);
+                        // Pick highest, or random among ties
+                        const highestLevel = userMaxLevels[0]?.maxLevel ?? 0;
+                        const topUsers = userMaxLevels.filter((u) => u.maxLevel === highestLevel);
+                        if (topUsers.length === 1) {
+                            syncLeaderId = topUsers[0].userId;
+                        }
+                        else if (topUsers.length > 1) {
+                            // Random pick among ties
+                            const randomIndex = Math.floor(Math.random() * topUsers.length);
+                            syncLeaderId = topUsers[randomIndex].userId;
+                        }
+                        debug_logger_1.logger.debug('Sync leader selection', {
+                            syncNodeId: nextNode.id,
+                            candidates: userMaxLevels,
+                            selectedLeader: syncLeaderId,
+                            wasRandom: topUsers.length > 1
+                        });
+                    }
+                    // Mark all waiting steps as completed
+                    await supabase
+                        .from('workflow_active_steps')
+                        .update({
+                        status: 'completed',
+                        completed_at: new Date().toISOString()
+                    })
+                        .eq('workflow_instance_id', workflowInstanceId)
+                        .eq('node_id', nextNode.id)
+                        .eq('status', 'waiting');
+                    // DON'T auto-progress past the sync node!
+                    // Instead, create an ACTIVE step AT the sync node for the sync leader
+                    // The sync leader must assign someone to the next step before the workflow progresses
+                    // Store the aggregate decision so routing can use it when sync is completed
+                    const { data: syncActiveStep } = await supabase
+                        .from('workflow_active_steps')
+                        .insert({
+                        workflow_instance_id: workflowInstanceId,
+                        node_id: nextNode.id, // Stay at the sync node
+                        branch_id: 'main',
+                        status: 'active', // Active, waiting for sync leader to assign next step
+                        assigned_user_id: syncLeaderId || currentUserId || null,
+                        aggregate_decision: syncResult.aggregateDecision // Store aggregate for routing
+                    })
+                        .select()
+                        .single();
+                    debug_logger_1.logger.debug('Created sync active step with aggregate decision', {
+                        syncNodeId: nextNode.id,
+                        syncLeaderId,
+                        aggregateDecision: syncResult.aggregateDecision,
+                        branchDecisions: syncResult.branchDecisions
+                    });
+                    if (syncActiveStep)
+                        newActiveSteps.push(syncActiveStep);
+                    // Update workflow instance current_node_id to the sync node
+                    await supabase
+                        .from('workflow_instances')
+                        .update({ current_node_id: nextNode.id })
+                        .eq('id', workflowInstanceId);
+                    // Release the sync lock now that sync is complete
+                    await supabase.rpc('release_sync_lock', {
+                        p_workflow_instance_id: workflowInstanceId,
+                        p_sync_node_id: nextNode.id
+                    });
+                }
+                else {
+                    // Not all branches arrived - mark this branch as waiting
+                    const { data: waitingStep } = await supabase
+                        .from('workflow_active_steps')
+                        .insert({
+                        workflow_instance_id: workflowInstanceId,
+                        node_id: nextNode.id,
+                        branch_id: newBranchId,
+                        status: 'waiting',
+                        assigned_user_id: null
+                    })
+                        .select()
+                        .single();
+                    if (waitingStep)
+                        newActiveSteps.push(waitingStep);
+                }
+                continue;
+            }
+            // Handle end nodes
+            if (nextNode.node_type === 'end') {
+                // Mark this branch as completed (no new active step needed)
+                continue;
+            }
+            // For regular nodes, create new active step
+            // Use per-node assignment if available (for parallel branches), otherwise fall back to single assignedUserId
+            const nodeAssignedUserId = assignedUsersPerNode?.[nextNode.id] || assignedUserId || null;
+            // CRITICAL: Validate that role/department nodes have users available
+            // This prevents creating orphaned steps that no one can act on
+            if ((nextNode.node_type === 'role' || nextNode.node_type === 'approval') && nextNode.entity_id && !nodeAssignedUserId) {
+                // Check if there are any users with this role
+                const { data: roleUsers } = await supabase
+                    .from('user_roles')
+                    .select('user_id')
+                    .eq('role_id', nextNode.entity_id)
+                    .limit(1);
+                if (!roleUsers || roleUsers.length === 0) {
+                    // Get role name for better error message
+                    const { data: roleInfo } = await supabase
+                        .from('roles')
+                        .select('name')
+                        .eq('id', nextNode.entity_id)
+                        .single();
+                    const roleName = roleInfo?.name || 'the required role';
+                    debug_logger_1.logger.error('No users available for role', { nodeId: nextNode.id, roleName, entityId: nextNode.entity_id });
+                    return {
+                        success: false,
+                        error: `Cannot proceed to "${nextNode.label}": No users have the "${roleName}" role. Please assign at least one user to this role.`
+                    };
+                }
+            }
+            else if (nextNode.node_type === 'department' && nextNode.entity_id && !nodeAssignedUserId) {
+                // Check if there are any users in this department
+                const { data: deptUsers } = await supabase
+                    .from('user_roles')
+                    .select('user_id, roles!inner(department_id)')
+                    .eq('roles.department_id', nextNode.entity_id)
+                    .limit(1);
+                if (!deptUsers || deptUsers.length === 0) {
+                    // Get department name for better error message
+                    const { data: deptInfo } = await supabase
+                        .from('departments')
+                        .select('name')
+                        .eq('id', nextNode.entity_id)
+                        .single();
+                    const deptName = deptInfo?.name || 'the required department';
+                    debug_logger_1.logger.error('No users available for department', { nodeId: nextNode.id, deptName, entityId: nextNode.entity_id });
+                    return {
+                        success: false,
+                        error: `Cannot proceed to "${nextNode.label}": No users are assigned to the "${deptName}" department. Please assign at least one user to a role in this department.`
+                    };
+                }
+            }
+            let newStep = null;
+            let stepCreationError = null;
+            // First, try to insert a new active step
+            const { data: insertedStep, error: insertError } = await supabase
+                .from('workflow_active_steps')
+                .insert({
+                workflow_instance_id: workflowInstanceId,
+                node_id: nextNode.id,
+                branch_id: newBranchId,
+                status: 'active',
+                assigned_user_id: nodeAssignedUserId
+            })
+                .select()
+                .single();
+            if (insertError) {
+                // Check if this is a unique constraint violation (error code 23505)
+                // This happens when routing back to a node that was previously visited
+                // (e.g., rejection routing back to a form node)
+                if (insertError.code === '23505') {
+                    debug_logger_1.logger.debug('Unique constraint hit - reactivating existing step', {
+                        workflowInstanceId,
+                        nodeId: nextNode.id,
+                        branchId: newBranchId
+                    });
+                    // Try to reactivate the existing step by updating it to 'active'
+                    const { data: reactivatedStep, error: updateError } = await supabase
+                        .from('workflow_active_steps')
+                        .update({
+                        status: 'active',
+                        activated_at: new Date().toISOString(),
+                        completed_at: null,
+                        assigned_user_id: nodeAssignedUserId
+                    })
+                        .eq('workflow_instance_id', workflowInstanceId)
+                        .eq('node_id', nextNode.id)
+                        .eq('branch_id', newBranchId)
+                        .select()
+                        .single();
+                    if (updateError) {
+                        debug_logger_1.logger.error('Failed to reactivate existing step', {
+                            error: updateError,
+                            workflowInstanceId,
+                            nodeId: nextNode.id,
+                            branchId: newBranchId
+                        });
+                        stepCreationError = updateError;
+                    }
+                    else {
+                        newStep = reactivatedStep;
+                        debug_logger_1.logger.debug('Reactivated existing step', {
+                            stepId: reactivatedStep?.id,
+                            nodeId: nextNode.id,
+                            nodeLabel: nextNode.label,
+                            branchId: newBranchId
+                        });
+                    }
+                }
+                else {
+                    // Different error - log and track it
+                    debug_logger_1.logger.error('Failed to create active step', {
+                        error: insertError,
+                        errorCode: insertError.code,
+                        workflowInstanceId,
+                        nodeId: nextNode.id,
+                        nodeLabel: nextNode.label,
+                        branchId: newBranchId
+                    });
+                    stepCreationError = insertError;
+                }
+            }
+            else {
+                newStep = insertedStep;
+                debug_logger_1.logger.debug('Created new active step', {
+                    stepId: insertedStep?.id,
+                    nodeId: nextNode.id,
+                    nodeLabel: nextNode.label,
+                    branchId: newBranchId,
+                    status: 'active'
+                });
+            }
+            // CRITICAL: If we couldn't create or reactivate a step, fail the operation
+            if (!newStep && stepCreationError) {
+                return {
+                    success: false,
+                    error: `Failed to create workflow step for "${nextNode.label}": ${stepCreationError.message || 'Unknown error'}`
+                };
+            }
+            if (newStep) {
+                newActiveSteps.push(newStep);
+            }
+            // Collect assignment for batch processing
+            if (instance.project_id) {
+                parallelAssignments.push({ node: nextNode, userId: nodeAssignedUserId });
+            }
+        }
+        // Apply all parallel assignments at once (to avoid each call removing the previous)
+        if (instance.project_id && parallelAssignments.length > 0) {
+            await assignProjectToParallelNodes(supabase, instance.project_id, parallelAssignments, currentUserId);
+        }
+        // Create workflow_history entry
+        const notesContent = inlineFormData
+            ? JSON.stringify({ type: 'inline_form', data: inlineFormData, decision, feedback })
+            : (decision ? JSON.stringify({ decision, feedback }) : null);
+        const { data: historyEntry } = await supabase.from('workflow_history').insert({
+            workflow_instance_id: workflowInstanceId,
+            from_node_id: currentNode.id,
+            to_node_id: nextNodes.length > 0 ? nextNodes[0]?.id : null,
+            transitioned_by: currentUserId,
+            transition_type: 'normal',
+            form_response_id: formResponseId,
+            notes: notesContent,
+        }).select('id').single();
+        const workflowHistoryId = historyEntry?.id || null;
+        // Create project issue on rejection
+        if (decision === 'rejected' && instance.project_id) {
+            const issueContent = `**Workflow Rejected**: ${currentNode.label}\n\n` +
+                `Workflow: ${instance.workflow_templates?.name || 'Unknown'}\n` +
+                `Reason: ${feedback || 'No reason provided'}`;
+            await supabase.from('project_issues').insert({
+                project_id: instance.project_id,
+                content: issueContent,
+                status: 'open',
+                created_by: currentUserId,
+                workflow_history_id: workflowHistoryId,
+            });
+        }
+        // Create project update
+        if (instance.project_id) {
+            let updateContent = '';
+            // For parallel paths, show all next node labels
+            const allNextLabels = nextNodes
+                .map((n) => n?.label)
+                .filter(Boolean)
+                .join(' & ');
+            if (decision === 'approved') {
+                updateContent = `**Approved**: ${currentNode.label} → ${allNextLabels || 'Complete'}` +
+                    (feedback ? `\nNotes: ${feedback}` : '');
+            }
+            else if (decision === 'rejected') {
+                updateContent = `**Rejected**: ${currentNode.label}\n` +
+                    `Reason: ${feedback || 'No reason provided'}`;
+            }
+            else {
+                updateContent = `**Progressed**: ${currentNode.label} → ${allNextLabels || 'Complete'}`;
+            }
+            // NOTE: Form data is NOT included in project updates.
+            // It is stored in workflow_history.notes and displayed in the dedicated
+            // "Workflow Form Data" section on the project page.
+            await supabase.from('project_updates').insert({
+                project_id: instance.project_id,
+                content: updateContent,
+                created_by: currentUserId,
+                workflow_history_id: workflowHistoryId,
+            });
+        }
+        // Check if workflow is complete
+        // IMPORTANT: If we just created new active steps, the workflow is NOT complete
+        // This prevents race conditions where the DB query in isWorkflowComplete might not
+        // see the newly inserted steps yet, or where insert errors cause silent failures
+        const workflowComplete = newActiveSteps.length === 0 && await isWorkflowComplete(supabase, workflowInstanceId);
+        debug_logger_1.logger.debug('Workflow completion check', {
+            workflowInstanceId,
+            newActiveStepsCount: newActiveSteps.length,
+            newActiveStepNodes: newActiveSteps.map((s) => s.node_id),
+            workflowComplete,
+            decision
+        });
+        // CRITICAL SAFETY CHECK: Rejection should NEVER complete the workflow
+        // If we're here with decision='rejected' and workflowComplete=true, something went wrong
+        if (workflowComplete && decision === 'rejected') {
+            debug_logger_1.logger.error('CRITICAL: Workflow would complete after rejection - preventing this and returning error', {
+                workflowInstanceId,
+                currentNodeLabel: currentNode.label,
+                nextNodesCount: nextNodes.length,
+                newActiveStepsCount: newActiveSteps.length
+            });
+            return {
+                success: false,
+                error: `Rejection failed: Could not route "${currentNode.label}" to next step. The workflow cannot be completed on rejection - please check the workflow configuration.`
+            };
+        }
+        // Capture snapshot if workflow is completing
+        let completedSnapshot = null;
+        if (workflowComplete) {
+            completedSnapshot = await captureWorkflowSnapshot(supabase, instance.workflow_template_id, workflowInstanceId);
+        }
+        // Update workflow instance
+        const primaryNextNode = nextNodes.length > 0 ? nextNodes[0] : null;
+        await supabase
+            .from('workflow_instances')
+            .update({
+            current_node_id: workflowComplete ? null : (primaryNextNode?.id || instance.current_node_id),
+            status: workflowComplete ? 'completed' : 'active',
+            completed_at: workflowComplete ? new Date().toISOString() : null,
+            ...(completedSnapshot && { completed_snapshot: completedSnapshot })
+        })
+            .eq('id', workflowInstanceId);
+        // Handle workflow completion
+        if (workflowComplete && instance.project_id) {
+            await completeProject(supabase, instance.project_id);
+        }
+        return {
+            success: true,
+            nextNode: primaryNextNode ?? undefined,
+            newActiveSteps
+        };
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error progressing workflow step', {}, error);
+        return { success: false, error: 'Internal server error' };
+    }
+}

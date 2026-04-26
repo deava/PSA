@@ -1,0 +1,181 @@
+import { NextResponse, NextRequest } from 'next/server';
+import { createApiSupabaseClient, createAdminSupabaseClient } from '@/lib/supabase-server';
+import { requireAuthAndPermission, handleGuardError } from '@/lib/server-guards';
+import { Permission } from '@/lib/permissions';
+import { logger } from '@/lib/debug-logger';
+import { isValidUUID } from '@/lib/validation-helpers';
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ roleId: string }> }
+) {
+  try {
+    const { roleId } = await params;
+
+    if (!isValidUUID(roleId)) {
+      return NextResponse.json({ error: 'Invalid ID format' }, { status: 400 });
+    }
+
+    // Check authentication and permission
+    const userProfile = await requireAuthAndPermission(Permission.MANAGE_USER_ROLES, {}, request);
+    
+    const supabase = createApiSupabaseClient(request);
+    const adminClient = createAdminSupabaseClient();
+    if (!supabase || !adminClient) {
+      return NextResponse.json({ error: 'Supabase not configured' }, { status: 500 });
+    }
+
+    // Parse request body
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
+    }
+    const { userId } = body;
+
+    if (!userId) {
+      return NextResponse.json({ error: 'User ID is required' }, { status: 400 });
+    }
+
+    // PRIVILEGE ESCALATION PROTECTION: Prevent users from assigning roles to themselves
+    if (userId === userProfile.id) {
+      return NextResponse.json({ 
+        error: 'You cannot assign roles to yourself. Please contact an administrator.' 
+      }, { status: 403 });
+    }
+
+    // Check if role exists
+    const { data: role, error: roleError } = await supabase
+      .from('roles')
+      .select('id, name')
+      .eq('id', roleId)
+      .single();
+
+    if (roleError || !role) {
+      return NextResponse.json({ error: 'Role not found' }, { status: 404 });
+    }
+
+    // Check if user exists
+    const { data: targetUser, error: userError } = await supabase
+      .from('user_profiles')
+      .select('id, name')
+      .eq('id', userId)
+      .single();
+
+    if (userError || !targetUser) {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+
+    // Check if assignment already exists
+    const { data: existingAssignment } = await supabase
+      .from('user_roles')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('role_id', roleId)
+      .single();
+
+    if (existingAssignment) {
+      return NextResponse.json({ error: 'User already has this role' }, { status: 400 });
+    }
+
+    // Get user's current roles for logging
+    const { data: currentRoles, error: currentRolesError } = await supabase
+      .from('user_roles')
+      .select(`
+        role_id,
+        roles!inner(name)
+      `)
+      .eq('user_id', userId);
+
+    if (currentRolesError) {
+      logger.error('Error fetching current roles', {}, currentRolesError as unknown as Error);
+      return NextResponse.json({ error: 'Failed to check current roles' }, { status: 500 });
+    }
+
+    // Helper function to check if a role is the "No Assigned Role" / "Unassigned" role
+    const isUnassignedRole = (roleName: string | undefined | null): boolean => {
+      if (!roleName) return false;
+      const nameLower = roleName.toLowerCase();
+      return nameLower === 'no assigned role' ||
+             nameLower === 'unassigned' ||
+             nameLower.includes('unassigned');
+    };
+
+    // Check if user is only in "No Assigned Role" (needs special handling due to P0001 constraint)
+    const noAssignedRole = currentRoles?.find((cr: any) => {
+      const roles = cr.roles as Record<string, unknown>;
+      return isUnassignedRole(roles?.name as string);
+    });
+    const hasOtherRoles = currentRoles?.some((cr: any) => {
+      const roles = cr.roles as Record<string, unknown>;
+      return !isUnassignedRole(roles?.name as string);
+    });
+    
+    if (noAssignedRole && !hasOtherRoles) {
+      logger.debug('User is only in "No Assigned Role", will replace with new role', {});
+      // Don't remove yet - we'll replace the assignment after adding the new role
+    } else if (noAssignedRole && hasOtherRoles) {
+      logger.debug('User has "No Assigned Role" + other roles, removing from "No Assigned Role"', {});
+      
+      const { error: deleteError } = await adminClient
+        .from('user_roles')
+        .delete()
+        .eq('user_id', userId)
+        .eq('role_id', noAssignedRole.role_id);
+
+      if (deleteError) {
+        logger.error('Error removing user from "No Assigned Role"', {}, deleteError as unknown as Error);
+        return NextResponse.json({ error: 'Failed to remove user from "No Assigned Role"' }, { status: 500 });
+      }
+
+      logger.debug('User removed from "No Assigned Role"', {});
+    } else {
+      logger.debug('User is not in "No Assigned Role", keeping existing roles', {});
+    }
+
+    // Create the new assignment
+    const { error: insertError } = await adminClient
+      .from('user_roles')
+      .insert({
+        user_id: userId,
+        role_id: roleId,
+        assigned_by: userProfile.id,
+        assigned_at: new Date().toISOString()
+      });
+
+    if (insertError) {
+      logger.error('Error assigning user to role', {}, insertError as unknown as Error);
+      return NextResponse.json({ error: 'Failed to assign user to role' }, { status: 500 });
+    }
+
+    // If user was only in "No Assigned Role", remove it now (after adding new role)
+    if (noAssignedRole && !hasOtherRoles) {
+      logger.debug('Now removing user from "No Assigned Role" (user now has new role)', {});
+      
+      const { error: deleteError } = await adminClient
+        .from('user_roles')
+        .delete()
+        .eq('user_id', userId)
+        .eq('role_id', noAssignedRole.role_id);
+
+      if (deleteError) {
+        logger.error('Error removing user from "No Assigned Role" after assignment', {}, deleteError as unknown as Error);
+        // Don't fail the request - user is already assigned to new role
+        logger.warn('User assigned to new role but failed to remove from "No Assigned Role"', {});
+      } else {
+        logger.debug('User removed from "No Assigned Role" after assignment', {});
+      }
+    }
+
+    logger.info(`User ${targetUser.name} assigned to ${role.name}`, { previousRolesCount: currentRoles?.length || 0 });
+
+    return NextResponse.json({ 
+      success: true,
+      message: `${targetUser.name} assigned to ${role.name}`
+    });
+  } catch (error: unknown) {
+    return handleGuardError(error);
+  }
+}
+

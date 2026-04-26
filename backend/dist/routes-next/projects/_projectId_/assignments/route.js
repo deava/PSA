@@ -1,0 +1,481 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.GET = GET;
+exports.POST = POST;
+exports.DELETE = DELETE;
+const server_1 = require("next/server");
+const supabase_server_1 = require("@/lib/supabase-server");
+const rbac_1 = require("@/lib/rbac");
+const permissions_1 = require("@/lib/permissions");
+const debug_logger_1 = require("@/lib/debug-logger");
+const validation_helpers_1 = require("@/lib/validation-helpers");
+/**
+ * GET /api/projects/[projectId]/assignments
+ * Get all active project assignments (team members) with workflow step info
+ * Returns memberType: 'collaborator' | 'workflow' | 'both' for each member
+ */
+async function GET(request, { params }) {
+    try {
+        const { projectId } = await params;
+        if (!(0, validation_helpers_1.isValidUUID)(projectId)) {
+            return server_1.NextResponse.json({ error: 'Invalid ID format' }, { status: 400 });
+        }
+        const supabase = (0, supabase_server_1.createApiSupabaseClient)(request);
+        if (!supabase) {
+            return server_1.NextResponse.json({ error: 'Database connection failed' }, { status: 500 });
+        }
+        const { data: { user } } = await admin.auth.getUser();
+        if (!user) {
+            return server_1.NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+        // Check project access
+        const { data: userProfile } = await admin
+            .from('user_profiles')
+            .select(`
+        *,
+        user_roles!user_id(
+          roles!role_id(
+            id,
+            name,
+            permissions,
+            department_id
+          )
+        )
+      `)
+            .eq('id', user.id)
+            .single();
+        if (!userProfile) {
+            return server_1.NextResponse.json({ error: 'User profile not found' }, { status: 404 });
+        }
+        const hasAccess = await (0, rbac_1.userHasProjectAccess)(userProfile, projectId, admin);
+        if (!hasAccess) {
+            return server_1.NextResponse.json({ error: 'You do not have access to this project' }, { status: 403 });
+        }
+        // PARALLEL QUERY 1: Get assignments and workflow instance concurrently
+        const [assignmentsResult, workflowResult] = await Promise.all([
+            admin
+                .from('project_assignments')
+                .select(`
+          id,
+          user_id,
+          role_in_project,
+          assigned_at,
+          assigned_by,
+          source_type,
+          workflow_node_id,
+          workflow_node_label,
+          user_profiles:user_id (
+            id,
+            name,
+            email,
+            image
+          )
+        `)
+                .eq('project_id', projectId)
+                .is('removed_at', null)
+                .order('assigned_at', { ascending: false }),
+            admin
+                .from('workflow_instances')
+                .select('id, status, workflow_template_id, started_snapshot')
+                .eq('project_id', projectId)
+                .in('status', ['active', 'completed'])
+                .order('started_at', { ascending: false })
+                .limit(1)
+                .maybeSingle()
+        ]);
+        const { data: assignments, error } = assignmentsResult;
+        const workflowInstance = workflowResult.data;
+        if (error) {
+            debug_logger_1.logger.error('Error fetching project assignments', {}, error);
+            return server_1.NextResponse.json({ error: 'Failed to fetch assignments' }, { status: 500 });
+        }
+        // Get user IDs from collaborators
+        const collaboratorUserIds = (assignments || []).map((a) => a.user_id).filter(Boolean);
+        // PARALLEL QUERY 2: Get user roles, node assignments, and active steps concurrently
+        const [userRolesResult, nodeAssignmentsResult, activeStepsResult] = await Promise.all([
+            collaboratorUserIds.length > 0
+                ? admin
+                    .from('user_roles')
+                    .select(`user_id, roles (name)`)
+                    .in('user_id', collaboratorUserIds)
+                : Promise.resolve({ data: [] }),
+            workflowInstance
+                ? admin
+                    .from('workflow_node_assignments')
+                    .select('node_id, user_id')
+                    .eq('workflow_instance_id', workflowInstance.id)
+                : Promise.resolve({ data: [] }),
+            workflowInstance
+                ? admin
+                    .from('workflow_active_steps')
+                    .select('node_id, assigned_user_id, status')
+                    .eq('workflow_instance_id', workflowInstance.id)
+                    .not('assigned_user_id', 'is', null)
+                : Promise.resolve({ data: [] })
+        ]);
+        // Build user roles map
+        const userRolesMap = {};
+        if (userRolesResult.data) {
+            for (const ur of userRolesResult.data) {
+                const roles = ur.roles;
+                const roleName = Array.isArray(roles)
+                    ? roles[0]?.name
+                    : roles?.name;
+                if (!userRolesMap[ur.user_id] && roleName) {
+                    userRolesMap[ur.user_id] = roleName;
+                }
+            }
+        }
+        // Helper to get node label from snapshot
+        const getNodeLabel = (nodeId) => {
+            if (!workflowInstance)
+                return 'Unknown Step';
+            const snapshot = workflowInstance.started_snapshot;
+            const nodes = snapshot?.nodes;
+            const node = nodes?.find((n) => n.id === nodeId);
+            return node?.label || 'Unknown Step';
+        };
+        // Build node assignments map from both sources
+        const nodeAssignmentsMap = {};
+        const workflowUserIds = new Set();
+        // From workflow_node_assignments
+        if (nodeAssignmentsResult.data) {
+            for (const na of nodeAssignmentsResult.data) {
+                const userId = na.user_id;
+                workflowUserIds.add(userId);
+                if (!nodeAssignmentsMap[userId]) {
+                    nodeAssignmentsMap[userId] = [];
+                }
+                nodeAssignmentsMap[userId].push({
+                    stepId: na.node_id,
+                    stepName: getNodeLabel(na.node_id)
+                });
+            }
+        }
+        // From workflow_active_steps
+        if (activeStepsResult.data) {
+            for (const step of activeStepsResult.data) {
+                const userId = step.assigned_user_id;
+                if (!userId)
+                    continue;
+                workflowUserIds.add(userId);
+                const stepInfo = {
+                    stepId: step.node_id,
+                    stepName: getNodeLabel(step.node_id),
+                    isActive: step.status === 'active'
+                };
+                if (!nodeAssignmentsMap[userId]) {
+                    nodeAssignmentsMap[userId] = [];
+                }
+                // Only add if not already present for this node
+                if (!nodeAssignmentsMap[userId].some((s) => s.stepId === stepInfo.stepId)) {
+                    nodeAssignmentsMap[userId].push(stepInfo);
+                }
+            }
+        }
+        // Find workflow-only users (not in project_assignments)
+        const collaboratorSet = new Set(collaboratorUserIds);
+        const workflowOnlyUserIds = [...workflowUserIds].filter(id => !collaboratorSet.has(id));
+        // PARALLEL QUERY 3: Get profiles and roles for workflow-only users
+        let missingUserProfiles = [];
+        const missingRolesMap = {};
+        if (workflowOnlyUserIds.length > 0) {
+            const [profilesResult, rolesResult] = await Promise.all([
+                admin
+                    .from('user_profiles')
+                    .select('id, name, email, image')
+                    .in('id', workflowOnlyUserIds),
+                admin
+                    .from('user_roles')
+                    .select(`user_id, roles (name)`)
+                    .in('user_id', workflowOnlyUserIds)
+            ]);
+            missingUserProfiles = profilesResult.data || [];
+            if (rolesResult.data) {
+                for (const ur of rolesResult.data) {
+                    const roles = ur.roles;
+                    const roleName = Array.isArray(roles)
+                        ? roles[0]?.name
+                        : roles?.name;
+                    if (!missingRolesMap[ur.user_id] && roleName) {
+                        missingRolesMap[ur.user_id] = roleName;
+                    }
+                }
+            }
+        }
+        // Enrich collaborator assignments with workflow info and memberType
+        const enrichedAssignments = (assignments || []).map((assignment) => {
+            const userId = assignment.user_id;
+            const nodeAssignments = nodeAssignmentsMap[userId] || [];
+            const primaryRole = userRolesMap[userId] || null;
+            const sourceType = assignment.source_type || 'manual';
+            // Determine memberType from source_type
+            // - 'creator' stays as 'creator'
+            // - 'workflow' stays as 'workflow'
+            // - 'manual' becomes 'collaborator'
+            let memberType;
+            if (sourceType === 'creator') {
+                memberType = 'creator';
+            }
+            else if (sourceType === 'workflow') {
+                memberType = 'workflow';
+            }
+            else {
+                memberType = 'collaborator';
+            }
+            return {
+                ...assignment,
+                workflow_step: nodeAssignments.length > 0 ? nodeAssignments[0] : null,
+                workflow_steps: nodeAssignments,
+                primary_role: primaryRole,
+                // memberType indicates how user was added to the team
+                memberType
+            };
+        });
+        // Create workflow-only team members
+        const virtualTeamMembers = missingUserProfiles.map((profile) => {
+            const nodeAssignments = nodeAssignmentsMap[profile.id] || [];
+            return {
+                id: `virtual-${profile.id}`,
+                user_id: profile.id,
+                role_in_project: 'workflow_step',
+                assigned_at: null,
+                assigned_by: null,
+                user_profiles: profile,
+                workflow_step: nodeAssignments.length > 0 ? nodeAssignments[0] : null,
+                workflow_steps: nodeAssignments,
+                primary_role: missingRolesMap[profile.id] || null,
+                is_virtual: true,
+                // New field: workflow-only members
+                memberType: 'workflow'
+            };
+        });
+        // Combine all members
+        const allAssignments = [...enrichedAssignments, ...virtualTeamMembers];
+        return server_1.NextResponse.json({
+            assignments: allAssignments,
+            has_active_workflow: workflowInstance?.status === 'active'
+        });
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error in GET /api/projects/[projectId]/assignments', {}, error);
+        return server_1.NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    }
+}
+/**
+ * POST /api/projects/[projectId]/assignments
+ * Add a new team member to the project
+ */
+async function POST(request, { params }) {
+    try {
+        const { projectId } = await params;
+        if (!(0, validation_helpers_1.isValidUUID)(projectId)) {
+            return server_1.NextResponse.json({ error: 'Invalid ID format' }, { status: 400 });
+        }
+        let body;
+        try {
+            body = await request.json();
+        }
+        catch {
+            return server_1.NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
+        }
+        const { userId, roleInProject } = body;
+        if (!userId) {
+            return server_1.NextResponse.json({ error: 'User ID is required' }, { status: 400 });
+        }
+        const supabase = (0, supabase_server_1.createApiSupabaseClient)(request);
+        if (!supabase) {
+            return server_1.NextResponse.json({ error: 'Database connection failed' }, { status: 500 });
+        }
+        const { data: { user } } = await admin.auth.getUser();
+        if (!user) {
+            return server_1.NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+        // Get user profile with roles
+        const { data: userProfile } = await admin
+            .from('user_profiles')
+            .select(`
+        *,
+        user_roles!user_id(
+          roles!role_id(
+            id,
+            name,
+            permissions,
+            department_id
+          )
+        )
+      `)
+            .eq('id', user.id)
+            .single();
+        if (!userProfile) {
+            return server_1.NextResponse.json({ error: 'User profile not found' }, { status: 404 });
+        }
+        // Get project details
+        const { data: project, error: projectError } = await admin
+            .from('projects')
+            .select('id, status, created_by')
+            .eq('id', projectId)
+            .single();
+        if (projectError || !project) {
+            return server_1.NextResponse.json({ error: 'Project not found' }, { status: 404 });
+        }
+        // Can't add members to completed projects
+        if (project.status === 'complete') {
+            return server_1.NextResponse.json({ error: 'Cannot add members to a completed project' }, { status: 400 });
+        }
+        // Check permissions
+        const userIsSuperadmin = (0, rbac_1.isSuperadmin)(userProfile);
+        const hasEditAllProjects = await (0, rbac_1.hasPermission)(userProfile, permissions_1.Permission.MANAGE_ALL_PROJECTS, undefined, admin);
+        const isProjectCreator = project.created_by === user.id;
+        if (!userIsSuperadmin && !hasEditAllProjects && !isProjectCreator) {
+            return server_1.NextResponse.json({
+                error: 'Only project creators or administrators can add team members'
+            }, { status: 403 });
+        }
+        // Check if user is already assigned (including soft-deleted)
+        const { data: existingAssignment } = await admin
+            .from('project_assignments')
+            .select('id, removed_at')
+            .eq('project_id', projectId)
+            .eq('user_id', userId)
+            .single();
+        if (existingAssignment) {
+            if (existingAssignment.removed_at === null) {
+                return server_1.NextResponse.json({ error: 'User is already assigned to this project' }, { status: 400 });
+            }
+            // Reactivate the existing assignment
+            const { error: updateError } = await admin
+                .from('project_assignments')
+                .update({
+                removed_at: null,
+                role_in_project: roleInProject || 'member',
+                source_type: 'manual'
+            })
+                .eq('id', existingAssignment.id);
+            if (updateError) {
+                debug_logger_1.logger.error('Error reactivating assignment', {}, updateError);
+                return server_1.NextResponse.json({ error: 'Failed to add team member' }, { status: 500 });
+            }
+        }
+        else {
+            // Create new assignment
+            const { error: insertError } = await admin
+                .from('project_assignments')
+                .insert({
+                project_id: projectId,
+                user_id: userId,
+                role_in_project: roleInProject || 'member',
+                assigned_by: user.id,
+                source_type: 'manual'
+            });
+            if (insertError) {
+                debug_logger_1.logger.error('Error creating assignment', {}, insertError);
+                return server_1.NextResponse.json({ error: 'Failed to add team member' }, { status: 500 });
+            }
+        }
+        return server_1.NextResponse.json({ success: true, message: 'Team member added successfully' });
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error in POST /api/projects/[projectId]/assignments', {}, error);
+        return server_1.NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    }
+}
+/**
+ * DELETE /api/projects/[projectId]/assignments
+ * Remove a team member from the project (soft delete)
+ */
+async function DELETE(request, { params }) {
+    try {
+        const { projectId } = await params;
+        if (!(0, validation_helpers_1.isValidUUID)(projectId)) {
+            return server_1.NextResponse.json({ error: 'Invalid ID format' }, { status: 400 });
+        }
+        const { searchParams } = new URL(request.url);
+        const userId = searchParams.get('userId');
+        if (!userId) {
+            return server_1.NextResponse.json({ error: 'User ID is required' }, { status: 400 });
+        }
+        const supabase = (0, supabase_server_1.createApiSupabaseClient)(request);
+        if (!supabase) {
+            return server_1.NextResponse.json({ error: 'Database connection failed' }, { status: 500 });
+        }
+        const { data: { user } } = await admin.auth.getUser();
+        if (!user) {
+            return server_1.NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+        // Get user profile with roles
+        const { data: userProfile } = await admin
+            .from('user_profiles')
+            .select(`
+        *,
+        user_roles!user_id(
+          roles!role_id(
+            id,
+            name,
+            permissions,
+            department_id
+          )
+        )
+      `)
+            .eq('id', user.id)
+            .single();
+        if (!userProfile) {
+            return server_1.NextResponse.json({ error: 'User profile not found' }, { status: 404 });
+        }
+        // Get project details
+        const { data: project, error: projectError } = await admin
+            .from('projects')
+            .select('id, status, created_by')
+            .eq('id', projectId)
+            .single();
+        if (projectError || !project) {
+            return server_1.NextResponse.json({ error: 'Project not found' }, { status: 404 });
+        }
+        // Can't remove members from completed projects
+        if (project.status === 'complete') {
+            return server_1.NextResponse.json({ error: 'Cannot remove members from a completed project' }, { status: 400 });
+        }
+        // Check permissions
+        const userIsSuperadmin = (0, rbac_1.isSuperadmin)(userProfile);
+        const hasEditAllProjects = await (0, rbac_1.hasPermission)(userProfile, permissions_1.Permission.MANAGE_ALL_PROJECTS, undefined, admin);
+        const isProjectCreator = project.created_by === user.id;
+        if (!userIsSuperadmin && !hasEditAllProjects && !isProjectCreator) {
+            return server_1.NextResponse.json({
+                error: 'Only project creators or administrators can remove team members'
+            }, { status: 403 });
+        }
+        // Soft delete the assignment
+        const { error: updateError } = await admin
+            .from('project_assignments')
+            .update({ removed_at: new Date().toISOString() })
+            .eq('project_id', projectId)
+            .eq('user_id', userId)
+            .is('removed_at', null);
+        if (updateError) {
+            debug_logger_1.logger.error('Error removing assignment', {}, updateError);
+            return server_1.NextResponse.json({ error: 'Failed to remove team member' }, { status: 500 });
+        }
+        // Also remove any workflow node assignments for this user in this project's workflows
+        const { data: workflowInstances } = await admin
+            .from('workflow_instances')
+            .select('id')
+            .eq('project_id', projectId);
+        if (workflowInstances && workflowInstances.length > 0) {
+            const instanceIds = workflowInstances.map((wi) => wi.id);
+            const { error: nodeAssignmentError } = await admin
+                .from('workflow_node_assignments')
+                .delete()
+                .in('workflow_instance_id', instanceIds)
+                .eq('user_id', userId);
+            if (nodeAssignmentError) {
+                debug_logger_1.logger.error('Error removing workflow node assignments', {}, nodeAssignmentError);
+                // Don't fail the whole operation, just log the error
+            }
+        }
+        return server_1.NextResponse.json({ success: true, message: 'Team member removed successfully' });
+    }
+    catch (error) {
+        debug_logger_1.logger.error('Error in DELETE /api/projects/[projectId]/assignments', {}, error);
+        return server_1.NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    }
+}

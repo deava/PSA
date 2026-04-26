@@ -1,0 +1,340 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Line clamp utilities */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-raleway);
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* ============================================================
+   Worklo DESIGN SYSTEM — Dark Premium Theme
+   Primary: Deep dark backgrounds, teal accent, crisp whites
+   ============================================================ */
+
+:root {
+  --radius: 0.5rem;
+
+  /* Worklo Brand Palette */
+  --Worklo-black:    #080B0F;
+  --Worklo-dark:     #0D1117;
+  --Worklo-surface:  #111827;
+  --Worklo-elevated: #161D2B;
+  --Worklo-border:   rgba(255, 255, 255, 0.08);
+  --Worklo-border-strong: rgba(255, 255, 255, 0.14);
+
+  /* Teal accent — Worklo's signature color */
+  --Worklo-teal:     #00C2A8;
+  --Worklo-teal-dim: rgba(0, 194, 168, 0.15);
+  --Worklo-teal-glow: rgba(0, 194, 168, 0.25);
+
+  /* Text hierarchy */
+  --Worklo-text-primary:   #F0F4F8;
+  --Worklo-text-secondary: #8B9BB4;
+  --Worklo-text-muted:     #4A5568;
+
+  /* -- Core tokens -- */
+  --background: #080B0F;
+  --foreground: #F0F4F8;
+
+  --card: #111827;
+  --card-foreground: #F0F4F8;
+
+  --popover: #161D2B;
+  --popover-foreground: #F0F4F8;
+
+  --primary: #00C2A8;
+  --primary-foreground: #080B0F;
+
+  --secondary: #161D2B;
+  --secondary-foreground: #8B9BB4;
+
+  --muted: #161D2B;
+  --muted-foreground: #8B9BB4;
+
+  --accent: #1A2235;
+  --accent-foreground: #F0F4F8;
+
+  --destructive: #EF4444;
+  --destructive-foreground: #FFFFFF;
+
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.06);
+  --ring: #00C2A8;
+
+  /* Chart colors */
+  --chart-1: #00C2A8;
+  --chart-2: #3B82F6;
+  --chart-3: #8B5CF6;
+  --chart-4: #F59E0B;
+  --chart-5: #EF4444;
+  --chart-6: #10B981;
+  --chart-7: #6366F1;
+  --chart-8: #EC4899;
+
+  /* Sidebar */
+  --sidebar:                    #0D1117;
+  --sidebar-bg:                 #0D1117;
+  --sidebar-foreground:         #F0F4F8;
+  --sidebar-border:             rgba(255, 255, 255, 0.07);
+  --sidebar-text:               #8B9BB4;
+  --sidebar-text-muted:         #4A5568;
+  --sidebar-text-active:        #F0F4F8;
+  --sidebar-section-header:     #4A5568;
+  --sidebar-active-bg:          rgba(0, 194, 168, 0.1);
+  --sidebar-active-border:      #00C2A8;
+  --sidebar-hover-bg:           rgba(255, 255, 255, 0.04);
+  --sidebar-profile-bg:         rgba(255, 255, 255, 0.04);
+  --sidebar-primary:            #00C2A8;
+  --sidebar-primary-foreground: #080B0F;
+  --sidebar-accent:             rgba(0, 194, 168, 0.1);
+  --sidebar-accent-foreground:  #F0F4F8;
+  --sidebar-ring:               #00C2A8;
+
+  /* Status colors */
+  --status-success:    #10B981;
+  --status-success-bg: rgba(16, 185, 129, 0.1);
+  --status-warning:    #F59E0B;
+  --status-warning-bg: rgba(245, 158, 11, 0.1);
+  --status-error:      #EF4444;
+  --status-error-bg:   rgba(239, 68, 68, 0.1);
+  --status-info:       #3B82F6;
+  --status-info-bg:    rgba(59, 130, 246, 0.1);
+
+  /* Typography Scale */
+  --text-2xs: 0.625rem;
+  --text-xs:  0.6875rem;
+  --text-sm:  0.75rem;
+  --text-base: 0.8125rem;
+  --text-md:  0.875rem;
+  --text-lg:  1rem;
+  --text-xl:  1.125rem;
+  --text-2xl: 1.25rem;
+  --text-3xl: 1.5rem;
+}
+
+/* Dark mode — same as root since we're dark-first */
+.dark {
+  --background: #080B0F;
+  --foreground: #F0F4F8;
+  --card: #111827;
+  --card-foreground: #F0F4F8;
+  --popover: #161D2B;
+  --popover-foreground: #F0F4F8;
+  --primary: #00C2A8;
+  --primary-foreground: #080B0F;
+  --secondary: #161D2B;
+  --secondary-foreground: #8B9BB4;
+  --muted: #161D2B;
+  --muted-foreground: #8B9BB4;
+  --accent: #1A2235;
+  --accent-foreground: #F0F4F8;
+  --destructive: #EF4444;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.06);
+  --ring: #00C2A8;
+  --chart-1: #00C2A8;
+  --chart-2: #3B82F6;
+  --chart-3: #8B5CF6;
+  --chart-4: #F59E0B;
+  --chart-5: #EF4444;
+  --chart-6: #10B981;
+  --chart-7: #6366F1;
+  --chart-8: #EC4899;
+  --sidebar: #0D1117;
+  --sidebar-foreground: #F0F4F8;
+  --sidebar-primary: #00C2A8;
+  --sidebar-primary-foreground: #080B0F;
+  --sidebar-accent: rgba(0, 194, 168, 0.1);
+  --sidebar-accent-foreground: #F0F4F8;
+  --sidebar-border: rgba(255, 255, 255, 0.07);
+  --sidebar-ring: #00C2A8;
+}
+
+@layer base {
+  *:not(svg):not(svg *) {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  /* Text selection */
+  ::selection {
+    background-color: rgba(0, 194, 168, 0.3) !important;
+    color: #F0F4F8 !important;
+  }
+  ::-moz-selection {
+    background-color: rgba(0, 194, 168, 0.3) !important;
+    color: #F0F4F8 !important;
+  }
+
+  /* Primary button */
+  [data-slot="button"]:not([class*="ghost"]):not([class*="outline"]):not([class*="secondary"]):not([class*="destructive"]):not([class*="link"]) {
+    font-weight: 600 !important;
+    letter-spacing: 0.01em;
+  }
+}
+
+/* -- Glass card utility -- */
+.glass-card {
+  background: rgba(17, 24, 39, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* -- Teal glow effect -- */
+.teal-glow {
+  box-shadow: 0 0 20px rgba(0, 194, 168, 0.2), 0 0 40px rgba(0, 194, 168, 0.08);
+}
+
+/* -- Gradient text -- */
+.gradient-text {
+  background: linear-gradient(135deg, #00C2A8 0%, #3B82F6 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* -- Subtle grid background -- */
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* -- Milestone marker colors -- */
+.milestone-marker {
+  background-color: var(--milestone-bg) !important;
+  color: white !important;
+  border-color: var(--milestone-border) !important;
+}
+
+/* -- Recharts SVG fixes -- */
+.recharts-line-curve {
+  stroke-width: 2 !important;
+  fill: none !important;
+}
+.recharts-line path {
+  stroke-width: inherit;
+  fill: none;
+}
+svg path,
+svg line,
+svg polyline {
+  border: none !important;
+}
+
+/* -- Animations -- */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in {
+  animation: fade-in 0.25s ease-out forwards;
+}
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.4; }
+  50%       { opacity: 0.7; }
+}
+.animate-skeleton {
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.7; transform: scale(0.97); }
+}
+.animate-pulse-slow {
+  animation: pulse-slow 2s ease-in-out infinite;
+}
+
+@keyframes teal-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 194, 168, 0.4); }
+  50%       { box-shadow: 0 0 0 8px rgba(0, 194, 168, 0); }
+}
+.animate-teal-pulse {
+  animation: teal-pulse 2s ease-in-out infinite;
+}
+
+/* -- Masonry Grid -- */
+.masonry-grid {
+  display: flex;
+  margin-left: -16px;
+  width: auto;
+}
+.masonry-grid-column {
+  padding-left: 16px;
+  background-clip: padding-box;
+}

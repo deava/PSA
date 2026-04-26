@@ -1,0 +1,200 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { getUserFromRequest, createAdminSupabaseClient } from '@/lib/supabase-server';
+import { userHasProjectAccess } from '@/lib/rbac';
+import { logger } from '@/lib/debug-logger';
+import { isValidUUID } from '@/lib/validation-helpers';
+
+/**
+ * PUT /api/projects/[projectId]/issues/[issueId]
+ * Update an issue (content or status)
+ */
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: Promise<{ projectId: string; issueId: string }> }
+) {
+  try {
+    const { projectId, issueId } = await params;
+    if (!isValidUUID(projectId) || !isValidUUID(issueId)) {
+      return NextResponse.json({ error: 'Invalid ID format' }, { status: 400 });
+    }
+
+    const user = await getUserFromRequest(request);
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const admin = createAdminSupabaseClient();
+    if (!admin) return NextResponse.json({ error: 'Database connection failed' }, { status: 500 });
+
+    // Get user profile
+    const { data: userProfile } = await admin
+      .from('user_profiles')
+      .select(`
+        *,
+        user_roles!user_id(
+          roles!role_id(
+            id,
+            name,
+            permissions,
+            department_id
+          )
+        )
+      `)
+      .eq('id', user.id)
+      .single();
+
+    if (!userProfile) {
+      return NextResponse.json({ error: 'User profile not found' }, { status: 404 });
+    }
+
+    // Check project access - if user has access to the project, they can edit issues
+    const hasAccess = await userHasProjectAccess(userProfile, projectId, admin);
+    if (!hasAccess) {
+      return NextResponse.json({ error: 'Insufficient permissions to edit issues' }, { status: 403 });
+    }
+
+    const body = await request.json();
+    const { content, status } = body;
+
+    // Build update object
+    const updates: Record<string, unknown> = {};
+
+    if (content !== undefined) {
+      if (!content.trim()) {
+        return NextResponse.json({ error: 'Issue content cannot be empty' }, { status: 400 });
+      }
+      updates.content = content.trim();
+    }
+
+    if (status !== undefined) {
+      if (!['open', 'in_progress', 'resolved'].includes(status)) {
+        return NextResponse.json({ error: 'Invalid status' }, { status: 400 });
+      }
+      updates.status = status;
+
+      // Handle resolved metadata
+      if (status === 'resolved') {
+        updates.resolved_at = new Date().toISOString();
+        updates.resolved_by = user.id;
+      } else {
+        updates.resolved_at = null;
+        updates.resolved_by = null;
+      }
+    }
+
+    // Update issue
+    const { data: issue, error } = await admin
+      .from('project_issues')
+      .update(updates)
+      .eq('id', issueId)
+      .eq('project_id', projectId)
+      .select(`
+        *,
+        user_profiles:created_by(id, name, email, image),
+        resolver_profiles:resolved_by(id, name, email, image)
+      `)
+      .single();
+
+    if (error) {
+      logger.error('Error updating issue:', {}, error as unknown as Error);
+      return NextResponse.json({ error: 'Failed to update issue' }, { status: 500 });
+    }
+
+    // Add user as project collaborator if not already assigned
+    const { data: existingAssignment } = await admin
+      .from('project_assignments')
+      .select('id, removed_at')
+      .eq('project_id', projectId)
+      .eq('user_id', user.id)
+      .single();
+
+    if (!existingAssignment) {
+      // Insert new assignment
+      await admin.from('project_assignments').insert({
+        project_id: projectId,
+        user_id: user.id,
+        role_in_project: 'collaborator',
+        assigned_by: user.id,
+        source_type: 'manual'
+      });
+    } else if (existingAssignment.removed_at) {
+      // Reactivate removed assignment
+      await admin
+        .from('project_assignments')
+        .update({ removed_at: null, role_in_project: 'collaborator', source_type: 'manual' })
+        .eq('id', existingAssignment.id);
+    }
+
+    return NextResponse.json({ success: true, issue });
+  } catch (error: unknown) {
+    logger.error('Error in PUT /api/projects/[projectId]/issues/[issueId]:', {}, error as Error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+
+/**
+ * DELETE /api/projects/[projectId]/issues/[issueId]
+ * Delete an issue
+ */
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ projectId: string; issueId: string }> }
+) {
+  try {
+    const { projectId, issueId } = await params;
+    if (!isValidUUID(projectId) || !isValidUUID(issueId)) {
+      return NextResponse.json({ error: 'Invalid ID format' }, { status: 400 });
+    }
+
+    const user = await getUserFromRequest(request);
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const admin = createAdminSupabaseClient();
+    if (!admin) return NextResponse.json({ error: 'Database connection failed' }, { status: 500 });
+
+    // Get user profile
+    const { data: userProfile } = await admin
+      .from('user_profiles')
+      .select(`
+        *,
+        user_roles!user_id(
+          roles!role_id(
+            id,
+            name,
+            permissions,
+            department_id
+          )
+        )
+      `)
+      .eq('id', user.id)
+      .single();
+
+    if (!userProfile) {
+      return NextResponse.json({ error: 'User profile not found' }, { status: 404 });
+    }
+
+    // Check project access - if user has access to the project, they can delete issues
+    const hasAccess = await userHasProjectAccess(userProfile, projectId, admin);
+    if (!hasAccess) {
+      return NextResponse.json({ error: 'Insufficient permissions to delete issues' }, { status: 403 });
+    }
+
+    // Only the creator can delete their issue (or superadmin via RLS)
+    const { error } = await admin
+      .from('project_issues')
+      .delete()
+      .eq('id', issueId)
+      .eq('project_id', projectId)
+      .eq('created_by', user.id);
+
+    if (error) {
+      logger.error('Error deleting issue:', {}, error as unknown as Error);
+      return NextResponse.json({ error: 'Failed to delete issue' }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true });
+  } catch (error: unknown) {
+    logger.error('Error in DELETE /api/projects/[projectId]/issues/[issueId]:', {}, error as Error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}

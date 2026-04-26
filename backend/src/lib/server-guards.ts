@@ -1,0 +1,495 @@
+/**
+ * Server-Side Guards for API Routes
+ * 
+ * These guards provide consistent permission checking and error handling
+ * for API routes. They throw standard errors that can be caught and
+ * converted to appropriate HTTP responses.
+ * 
+ * Usage in API routes:
+ * ```typescript
+ * import { requirePermission, requireAuthentication } from '@/lib/server-guards';
+ *
+ * export async function POST(request: Request) {
+ *   const user = await requireAuthentication();
+ *   await requirePermission(user, Permission.MANAGE_PROJECTS, { accountId });
+ *   // ... rest of handler
+ * }
+ * ```
+ */
+
+import { NextRequest, NextResponse } from 'next/server';
+import { createApiSupabaseClient, createServerSupabaseClient, getUserFromRequest } from './supabase-server';
+import { UserWithRoles } from './rbac';
+import { Permission, PermissionContext } from './permissions';
+import { checkPermissionHybrid, isSuperadmin } from './permission-checker';
+import { logger } from './debug-logger';
+
+// ================================================================================
+// CUSTOM ERROR TYPES
+// ================================================================================
+
+export class AuthenticationError extends Error {
+  constructor(message: string = 'Authentication required') {
+    super(message);
+    this.name = 'AuthenticationError';
+  }
+}
+
+export class PermissionError extends Error {
+  permission?: Permission;
+  context?: PermissionContext;
+  
+  constructor(message: string = 'Insufficient permissions', permission?: Permission, context?: PermissionContext) {
+    super(message);
+    this.name = 'PermissionError';
+    this.permission = permission;
+    this.context = context;
+  }
+}
+
+export class ForbiddenError extends Error {
+  constructor(message: string = 'Forbidden') {
+    super(message);
+    this.name = 'ForbiddenError';
+  }
+}
+
+// ================================================================================
+// AUTHENTICATION GUARDS
+// ================================================================================
+
+/**
+ * Require that the user is authenticated
+ * Throws AuthenticationError if not authenticated
+ * @param request - Optional NextRequest for API routes
+ * @returns UserWithRoles profile
+ */
+export async function requireAuthentication(request?: NextRequest): Promise<UserWithRoles> {
+  try {
+    if (!request) {
+      throw new AuthenticationError('Authentication failed - request parameter required');
+    }
+
+    // Use admin.auth.getUser(token) — the only reliable way in Express context
+    const user = await getUserFromRequest(request);
+    if (!user) {
+      throw new AuthenticationError('You must be logged in to access this resource');
+    }
+
+    // Fetch full profile using admin client
+    const { createAdminSupabaseClient } = await import('./supabase-server');
+    const admin = createAdminSupabaseClient();
+    if (!admin) throw new AuthenticationError('Supabase not configured');
+
+    const { data: userProfile, error: profileError } = await admin
+      .from('user_profiles')
+      .select(`*, user_roles!user_id(
+        id, role_id, assigned_at, assigned_by,
+        roles!role_id(
+          *, departments(*)
+        )
+      )`)
+      .eq('id', user.id)
+      .single();
+
+    if (profileError || !userProfile) {
+      throw new AuthenticationError('User profile not found');
+    }
+
+    return userProfile as unknown as UserWithRoles;
+  } catch (error: unknown) {
+    if (error instanceof AuthenticationError) throw error;
+    throw new AuthenticationError('Authentication failed');
+  }
+}
+/**
+ * Optionally get authenticated user (doesn't throw if not authenticated)
+ * @returns UserWithRoles profile or null
+ */
+export async function getAuthenticatedUser(): Promise<UserWithRoles | null> {
+  try {
+    return await requireAuthentication();
+  } catch (_error: unknown) {
+    return null;
+  }
+}
+
+// ================================================================================
+// PERMISSION GUARDS
+// ================================================================================
+
+/**
+ * Require that the user has a specific permission
+ * Throws PermissionError if user doesn't have permission
+ * @param userProfile - User profile with roles
+ * @param permission - Required permission
+ * @param context - Optional context (project, account, department)
+ * @param supabaseClient - Optional Supabase client for context-aware checks (REQUIRED for server-side)
+ */
+export async function requirePermission(
+  userProfile: UserWithRoles,
+  permission: Permission,
+  context?: PermissionContext,
+  supabaseClient?: any
+): Promise<void> {
+  try {
+    const hasPermission = await checkPermissionHybrid(userProfile, permission, context, supabaseClient);
+
+    if (!hasPermission) {
+      logger.warn('Permission denied', {
+        userId: userProfile.id,
+        permission,
+        context
+      });
+
+      throw new PermissionError(
+        `You don't have permission to perform this action`,
+        permission,
+        context
+      );
+    }
+  } catch (error: unknown) {
+    if (error instanceof PermissionError) {
+      throw error;
+    }
+    logger.error('Exception in requirePermission', { permission, context }, error as Error);
+    throw new PermissionError('Permission check failed', permission, context);
+  }
+}
+
+/**
+ * Require that the user has ANY of the specified permissions
+ * @param userProfile - User profile with roles
+ * @param permissions - Array of permissions (user needs at least one)
+ * @param context - Optional context
+ * @param supabaseClient - Optional Supabase client for context-aware checks (REQUIRED for server-side)
+ */
+export async function requireAnyPermission(
+  userProfile: UserWithRoles,
+  permissions: Permission[],
+  context?: PermissionContext,
+  supabaseClient?: any
+): Promise<void> {
+  for (const permission of permissions) {
+    try {
+      await requirePermission(userProfile, permission, context, supabaseClient);
+      return; // Success - user has at least one permission
+    } catch (_error: unknown) {
+      // Continue checking other permissions
+    }
+  }
+
+  // None of the permissions matched
+  logger.warn('None of required permissions granted', {
+    userId: userProfile.id,
+    permissions,
+    context
+  });
+
+  throw new PermissionError(
+    `You don't have any of the required permissions`,
+    permissions[0], // Just use first permission for error tracking
+    context
+  );
+}
+
+/**
+ * Require that the user has ALL of the specified permissions
+ * @param userProfile - User profile with roles
+ * @param permissions - Array of permissions (user needs all of them)
+ * @param context - Optional context
+ * @param supabaseClient - Optional Supabase client for context-aware checks (REQUIRED for server-side)
+ */
+export async function requireAllPermissions(
+  userProfile: UserWithRoles,
+  permissions: Permission[],
+  context?: PermissionContext,
+  supabaseClient?: any
+): Promise<void> {
+  for (const permission of permissions) {
+    await requirePermission(userProfile, permission, context, supabaseClient);
+  }
+}
+
+// ================================================================================
+// ROLE GUARDS
+// ================================================================================
+
+/**
+ * Require that the user is a superadmin
+ * Throws ForbiddenError if not superadmin
+ * @param userProfile - User profile with roles
+ */
+export async function requireSuperadmin(userProfile: UserWithRoles): Promise<void> {
+  if (!isSuperadmin(userProfile)) {
+    logger.warn('Superadmin access required but user is not superadmin', {
+      userId: userProfile.id
+    });
+    throw new ForbiddenError('Superadmin access required');
+  }
+}
+
+/**
+ * Require that the user is NOT unassigned
+ * Throws ForbiddenError if user has no roles or only Unassigned role
+ * @param userProfile - User profile with roles
+ */
+export async function requireAssignedRole(userProfile: UserWithRoles): Promise<void> {
+  if (!userProfile.user_roles || userProfile.user_roles.length === 0) {
+    throw new ForbiddenError('You must be assigned a role to access this resource');
+  }
+  
+  // Check if user has only Unassigned role
+  if (userProfile.user_roles.length === 1) {
+    const role = userProfile.user_roles[0].roles;
+    if (role.is_system_role && role.name.toLowerCase() === 'unassigned') {
+      throw new ForbiddenError('You must be assigned a role to access this resource');
+    }
+  }
+}
+
+// ================================================================================
+// RESOURCE OWNERSHIP GUARDS
+// ================================================================================
+
+/**
+ * Require that the user owns a resource or has permission to access it
+ * @param userProfile - User profile with roles
+ * @param resourceOwnerId - ID of the user who owns the resource
+ * @param overridePermission - Optional permission that grants access regardless of ownership
+ */
+export async function requireOwnershipOrPermission(
+  userProfile: UserWithRoles,
+  resourceOwnerId: string,
+  overridePermission?: Permission
+): Promise<void> {
+  // Check ownership
+  if (userProfile.id === resourceOwnerId) {
+    return;
+  }
+  
+  // Check override permission if provided
+  if (overridePermission) {
+    await requirePermission(userProfile, overridePermission);
+    return;
+  }
+  
+  // Neither ownership nor permission
+  throw new ForbiddenError('You can only access your own resources');
+}
+
+// ================================================================================
+// ERROR RESPONSE HELPERS
+// ================================================================================
+
+/**
+ * Convert guard errors to Next.js responses
+ * Use this in catch blocks of API routes
+ * @param error - The error thrown
+ * @returns NextResponse with appropriate status code and message
+ */
+export function handleGuardError(error: unknown): NextResponse {
+  if (error instanceof AuthenticationError) {
+    return NextResponse.json(
+      { error: error.message, code: 'UNAUTHENTICATED' },
+      { status: 401 }
+    );
+  }
+  
+  if (error instanceof PermissionError) {
+    return NextResponse.json(
+      {
+        error: error.message,
+        code: 'PERMISSION_DENIED',
+      },
+      { status: 403 }
+    );
+  }
+  
+  if (error instanceof ForbiddenError) {
+    return NextResponse.json(
+      { error: error.message, code: 'FORBIDDEN' },
+      { status: 403 }
+    );
+  }
+  
+  // Generic error
+  logger.error('Unhandled error in API route', {}, error as Error);
+  return NextResponse.json(
+    { error: 'Internal server error', code: 'INTERNAL_ERROR' },
+    { status: 500 }
+  );
+}
+
+/**
+ * Wrap an API handler with automatic error handling
+ * @param handler - The API route handler
+ * @returns Wrapped handler with error handling
+ *
+ * Usage:
+ * ```typescript
+ * export const POST = withErrorHandling(async (request: Request) => {
+ *   const user = await requireAuthentication();
+ *   // ... rest of handler
+ *   return NextResponse.json({ success: true });
+ * });
+ * ```
+ */
+export function withErrorHandling(
+  handler: (request: NextRequest, context?: { params: Record<string, string> }) => Promise<NextResponse>
+) {
+  return async (request: NextRequest, context?: { params: Record<string, string> }): Promise<NextResponse> => {
+    try {
+      return await handler(request, context);
+    } catch (error: unknown) {
+      return handleGuardError(error);
+    }
+  };
+}
+
+// ================================================================================
+// API ROUTE WRAPPER (eliminates per-route boilerplate)
+// ================================================================================
+
+/**
+ * Context provided to withApiRoute handlers.
+ */
+export interface ApiRouteContext {
+  /** Authenticated user with roles */
+  user: UserWithRoles;
+  /** Supabase client scoped to the authenticated user (never null) */
+  supabase: NonNullable<ReturnType<typeof createApiSupabaseClient>>;
+  /** Route params (e.g. { projectId: '...' }) */
+  params: Record<string, string>;
+}
+
+/**
+ * Comprehensive API route wrapper that eliminates boilerplate.
+ *
+ * Handles: Supabase client creation, authentication, permission checks,
+ * and error responses. Your handler receives a pre-authenticated context.
+ *
+ * Usage:
+ * ```typescript
+ * // Simple authenticated route
+ * export const GET = withApiRoute(async (request, { user, supabase }) => {
+ *   const { data } = await supabase.from('projects').select('*');
+ *   return NextResponse.json(data);
+ * });
+ *
+ * // Route with permission check
+ * export const POST = withApiRoute(
+ *   async (request, { user, supabase }) => {
+ *     const body = await request.json();
+ *     const { data } = await supabase.from('projects').insert(body).select().single();
+ *     return NextResponse.json(data, { status: 201 });
+ *   },
+ *   { permission: Permission.MANAGE_PROJECTS }
+ * );
+ *
+ * // Route with contextual permission
+ * export const PUT = withApiRoute(
+ *   async (request, { user, supabase, params }) => {
+ *     const body = await request.json();
+ *     await supabase.from('projects').update(body).eq('id', params.projectId);
+ *     return NextResponse.json({ success: true });
+ *   },
+ *   {
+ *     permission: Permission.MANAGE_PROJECTS,
+ *     getContext: (_req, params) => ({ projectId: params.projectId }),
+ *   }
+ * );
+ * ```
+ */
+export function withApiRoute(
+  handler: (request: NextRequest, ctx: ApiRouteContext) => Promise<NextResponse>,
+  options?: {
+    /** Permission required to access this route */
+    permission?: Permission;
+    /** Derive permission context from request/params */
+    getContext?: (request: NextRequest, params: Record<string, string>) => PermissionContext;
+  }
+) {
+  return async (
+    request: NextRequest,
+    routeContext?: { params: Promise<Record<string, string>> | Record<string, string> }
+  ): Promise<NextResponse> => {
+    try {
+      const supabase = createApiSupabaseClient(request);
+      if (!supabase) {
+        return NextResponse.json({ error: 'Database connection failed' }, { status: 500 });
+      }
+
+      const user = await requireAuthentication(request);
+
+      // Next.js 15 makes params a Promise in some cases
+      const params = routeContext?.params
+        ? (typeof (routeContext.params as Promise<Record<string, string>>).then === 'function'
+            ? await routeContext.params
+            : routeContext.params as Record<string, string>)
+        : {};
+
+      if (options?.permission) {
+        const permContext = options.getContext?.(request, params);
+        await requirePermission(user, options.permission, permContext, supabase);
+      }
+
+      return await handler(request, { user, supabase, params });
+    } catch (error: unknown) {
+      return handleGuardError(error);
+    }
+  };
+}
+
+// ================================================================================
+// COMBINED GUARDS (CONVENIENCE)
+// ================================================================================
+
+/**
+ * All-in-one: Require authentication + permission
+ * @param permission - Required permission
+ * @param context - Optional context
+ * @param request - Optional NextRequest for API routes
+ * @returns UserWithRoles profile
+ */
+export async function requireAuthAndPermission(
+  permission: Permission,
+  context?: PermissionContext,
+  request?: NextRequest
+): Promise<UserWithRoles> {
+  const user = await requireAuthentication(request);
+  // Create Supabase client from request for context-aware permission checks
+  const supabaseClient = request ? createApiSupabaseClient(request) : null;
+  await requirePermission(user, permission, context, supabaseClient);
+  return user;
+}
+
+/**
+ * All-in-one: Require authentication + any permission
+ * @param permissions - Array of permissions (need at least one)
+ * @param context - Optional context
+ * @param request - Optional NextRequest for API routes
+ * @returns UserWithRoles profile
+ */
+export async function requireAuthAndAnyPermission(
+  permissions: Permission[],
+  context?: PermissionContext,
+  request?: NextRequest
+): Promise<UserWithRoles> {
+  const user = await requireAuthentication(request);
+  // Create Supabase client from request for context-aware permission checks
+  const supabaseClient = request ? createApiSupabaseClient(request) : null;
+  await requireAnyPermission(user, permissions, context, supabaseClient);
+  return user;
+}
+
+/**
+ * All-in-one: Require authentication + superadmin
+ * @returns UserWithRoles profile
+ */
+export async function requireAuthAndSuperadmin(): Promise<UserWithRoles> {
+  const user = await requireAuthentication();
+  await requireSuperadmin(user);
+  return user;
+}
+

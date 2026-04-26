@@ -1,0 +1,130 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { createApiSupabaseClient, getUserProfileFromRequest } from '@/lib/supabase-server';
+import { getUserPendingApprovals } from '@/lib/workflow-execution-service';
+import { checkPermissionHybrid } from '@/lib/permission-checker';
+import { Permission } from '@/lib/permissions';
+import { logger } from '@/lib/debug-logger';
+
+export async function GET(request: NextRequest) {
+  try {
+    const supabase = createApiSupabaseClient(request);
+    if (!supabase) {
+      return NextResponse.json({ error: 'Database connection failed' }, { status: 500 });
+    }
+
+    // Get current user with profile
+    const userProfile = await getUserProfileFromRequest(supabase);
+    if (!userProfile) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Check EXECUTE_WORKFLOWS permission
+    const canExecute = await checkPermissionHybrid(userProfile, Permission.EXECUTE_WORKFLOWS, undefined, admin);
+    if (!canExecute) {
+      return NextResponse.json({ error: 'Insufficient permissions' }, { status: 403 });
+    }
+
+    const isSuperadmin = (userProfile as any).is_superadmin === true;
+    const user = { id: (userProfile as any).id };
+
+    let approvals: Record<string, unknown>[] = [];
+
+    if (isSuperadmin) {
+      // Superadmins see ALL pending approvals across all users
+      // Query workflow_active_steps to support parallel workflows
+      // IMPORTANT: Use left join for workflow_nodes so deleted templates don't break the query
+      // Query without workflow_nodes FK join - use snapshot data instead
+      // The FK workflow_active_steps_node_id_fkey may not exist if node was deleted after workflow started
+      // Use explicit FK names to avoid "multiple relationships" errors
+      const { data: activeSteps, error } = await supabase
+        .from('workflow_active_steps')
+        .select(`
+          id,
+          workflow_instance_id,
+          node_id,
+          status,
+          activated_at,
+          assigned_user_id,
+          workflow_instances:workflow_active_steps_workflow_instance_id_fkey!inner(
+            id,
+            status,
+            project_id,
+            workflow_template_id,
+            current_node_id,
+            started_snapshot,
+            projects:workflow_instances_project_id_fkey!inner(
+              id,
+              name,
+              description,
+              status,
+              priority,
+              account_id,
+              accounts(id, name)
+            )
+          ),
+          assigned_user:user_profiles(
+            id,
+            name,
+            email
+          )
+        `)
+        .eq('status', 'active');
+
+      if (error) {
+        logger.error('[my-approvals] Error querying active steps', {}, error as unknown as Error);
+      }
+
+      if (!error && activeSteps) {
+        // Filter to only approval nodes in active workflow instances
+        const filteredSteps = activeSteps.filter((step: any) => {
+          const instance = step.workflow_instances as Record<string, unknown>;
+          if (!instance) return false;
+          if ((instance.status as string) !== 'active') return false;
+
+          // Get node data from snapshot (we removed the FK join because it may not exist)
+          const snapshot = instance.started_snapshot as Record<string, unknown>;
+          const nodes = snapshot?.nodes as Record<string, unknown>[] | undefined;
+          const node = nodes?.find((n: any) => n.id === step.node_id);
+
+          if (!node) {
+            logger.warn('[my-approvals] Node not found in snapshot', { stepId: step.id, nodeId: step.node_id });
+            return false;
+          }
+          return (node.node_type as string) === 'approval';
+        });
+
+        // Transform to match expected format
+        approvals = filteredSteps.map((step: any) => {
+          // Get node data from snapshot
+          const instance = step.workflow_instances as Record<string, unknown>;
+          const snapshot = instance.started_snapshot as Record<string, unknown>;
+          const nodes = snapshot?.nodes as Record<string, unknown>[] | undefined;
+          const nodeData = nodes?.find((n: any) => n.id === step.node_id);
+
+          return {
+            ...instance,
+            workflow_nodes: nodeData,
+            projects: instance.projects,
+            active_step_id: step.id,
+            current_node_id: step.node_id,
+            assigned_user: step.assigned_user || null
+          };
+        });
+      }
+    } else {
+      // Regular users see only their pending approvals based on role
+      approvals = await getUserPendingApprovals(supabase, user.id);
+    }
+
+    return NextResponse.json({
+      success: true,
+      approvals,
+    });
+  } catch (error: unknown) {
+    logger.error('Error in GET /api/workflows/my-approvals', {}, error as Error);
+    return NextResponse.json(
+      { error: 'Internal server error' },
+      { status: 500 }
+    );
+  }
+}
