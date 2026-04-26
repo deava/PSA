@@ -188,4 +188,4 @@ npm run build && npm start                  # port 3000
 
 ## License
 
-Proprietary 2025 Worklo. All rights reserved. See [LICENSE](LICENSE).
+Proprietary 2026 Worklo. All rights reserved. See [LICENSE](LICENSE).
